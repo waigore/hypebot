@@ -13,6 +13,9 @@ from .data import DataClient, DataStorage
 from .indicators import RSICalculator
 from .position import PositionManager
 from .exchange import HyperliquidClient
+from .strategy.runner import StrategyRunner, RunnerMode, ExecutionConfig
+from .strategy.rsi_strategy import RSIStrategy
+from .strategy.client import TradingClientInterface
 
 
 # Configure logging
@@ -46,6 +49,46 @@ class HypeBot:
         )
         self.position_manager = PositionManager(config.trading, self.data_storage)
         self.hyperliquid_client = HyperliquidClient(config.hyperliquid)
+
+        # Adapter to satisfy TradingClientInterface
+        class _HyperliquidAdapter(TradingClientInterface):
+            def __init__(self, client: HyperliquidClient):
+                self._client = client
+
+            async def place_order(self, symbol: str, side: str, order_type: str, quantity: float, price=None):
+                async with self._client as c:
+                    return await c.place_order(symbol=symbol, side=side, order_type=order_type, quantity=quantity, price=price)
+
+            async def cancel_order(self, order_id: str) -> bool:
+                async with self._client as c:
+                    return await c.cancel_order(order_id)
+
+            async def get_positions(self):
+                async with self._client as c:
+                    return await c.get_positions()
+
+        self.trading_client: TradingClientInterface = _HyperliquidAdapter(self.hyperliquid_client)
+
+        # Build Strategy and Runner
+        self.strategy = RSIStrategy(
+            assets=[self.config.trading.default_symbol],
+            interval=self.config.data.default_interval,
+            position_manager=self.position_manager,
+            rsi_calculator=self.rsi_calculator,
+        )
+
+        def _load(symbol: str, interval: str, start, end) -> pd.DataFrame:
+            # Use historical OHLCV from DataStorage per spec
+            return self.data_storage.get_historical_ohlcv_data(symbol=symbol, granularity=interval, start_date=start, end_date=end)
+
+        self.runner = StrategyRunner(
+            strategy=self.strategy,
+            position_manager=self.position_manager,
+            trading_client=self.trading_client,
+            data_loader=_load,
+            mode=RunnerMode.LIVE,
+            execution_config=ExecutionConfig(strength_threshold=0.3, cooldown_seconds=int(self.signal_cooldown.total_seconds())),
+        )
         
         # Trading state
         self.current_symbol = config.trading.default_symbol
@@ -104,9 +147,15 @@ class HypeBot:
             
             while self.running:
                 try:
-                    await self._trading_cycle()
+                    # Refresh latest spot price into storage for the asset
+                    async with self.data_client as client:
+                        price_data = await client.get_price(self.current_symbol)
+                        if price_data:
+                            self.data_storage.save_price_data([price_data])
+                    # Execute one runner tick at current time
+                    now = datetime.utcnow()
+                    await self.runner.run([now])
                     await asyncio.sleep(60)  # Wait 1 minute between cycles
-                    
                 except Exception as e:
                     logger.error(f"Error in trading cycle: {e}")
                     await asyncio.sleep(30)  # Wait 30 seconds before retrying
@@ -119,52 +168,9 @@ class HypeBot:
             await self._cleanup()
     
     async def _trading_cycle(self):
-        """Execute one trading cycle."""
-        try:
-            # Get current price data
-            async with self.data_client as client:
-                price_data = await client.get_price(self.current_symbol)
-                if not price_data:
-                    logger.warning(f"Failed to get price data for {self.current_symbol}")
-                    return
-                
-                # Save price data
-                self.data_storage.save_price_data([price_data])
-            
-            # Get historical data for RSI calculation
-            historical_data = self.data_storage.load_price_data(
-                symbol=self.current_symbol,
-                start_date=datetime.utcnow() - timedelta(days=30)
-            )
-            
-            if len(historical_data) < self.config.trading.rsi_period + 1:
-                logger.warning(f"Insufficient historical data for {self.current_symbol}")
-                return
-            
-            # Calculate RSI and generate signals
-            rsi_results = self.rsi_calculator.calculate(historical_data)
-            if not rsi_results:
-                logger.warning("No RSI results generated")
-                return
-            
-            latest_rsi = rsi_results[-1]
-            logger.info(f"Latest RSI for {self.current_symbol}: {latest_rsi.value:.2f}")
-            
-            # Generate trading signal
-            signal = self.rsi_calculator.generate_signal(
-                current_value=latest_rsi.value,
-                previous_value=latest_rsi.metadata.get("previous_rsi") if latest_rsi.metadata else None,
-                metadata={"symbol": self.current_symbol}
-            )
-            
-            if signal and self._should_process_signal(signal):
-                await self._process_signal(signal, price_data.price)
-            
-            # Update existing positions
-            await self._update_positions()
-            
-        except Exception as e:
-            logger.error(f"Error in trading cycle: {e}")
+        """Deprecated: kept for backward compatibility, replaced by StrategyRunner loop."""
+        now = datetime.utcnow()
+        await self.runner.run([now])
     
     def _should_process_signal(self, signal) -> bool:
         """Check if signal should be processed based on cooldown and other criteria."""

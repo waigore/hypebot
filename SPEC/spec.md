@@ -31,16 +31,20 @@ Set up a Python-based crypto trading bot called HypeBot that connects to Hyperli
 - [ ] Data provider is configurable (CoinGecko or Yahoo Finance) without caller code changes
 - [ ] Historical OHLCV retrieval returns standardized DataFrame shape and UTC timestamps
 - [ ] CSV storage supports bidirectional conversion between OHLCVData models and pandas DataFrames
+- [ ] Strategy interface defined with mockable dependencies and abstract `tick()`
+- [ ] Strategy runner feeds time-sliced historical data per tick and places orders via trading client
+- [ ] Backtesting supported by running strategies over historical data without live side-effects
 
 ## 2. Technical Approach
 
 ### Architecture Overview
-The bot is built as 4 separate modules with async/await patterns, plus utility programs:
+The bot is built as 5 separate modules with async/await patterns, plus utility programs:
 
 ```
 hypebot/
 ├── main.py                  # Main bot orchestration
 ├── config.py                # Configuration settings
+├── strategy/                # Strategy interfaces and runner (NEW)
 ├── exchange/                # Hyperliquid integration
 ├── data/                    # Data providers (CoinGecko/yfinance) and storage
 ├── indicators/              # RSI calculation and signals
@@ -261,6 +265,45 @@ BTC-USD,2025-01-01T01:00:00+00:00,45200.0,45300.0,45100.0,45150.0,980000.0,coing
 - **models.py**: Indicator and signal models with comprehensive metadata
 
 ### Position Module (position/)
+### Strategy Module (strategy/)
+- **Purpose**: Provide an abstract, testable strategy interface that produces position-sized buy/sell signals across multiple assets given market conditions, and a strategy runner that orchestrates ticking and order execution for both backtesting and live trading.
+
+- **Files**:
+  - `base.py`: Defines `Strategy` ABC with lifecycle hooks and `tick()`
+  - `runner.py`: Defines `StrategyRunner` to iterate ticks, slice historical data, invoke strategy, and execute orders
+  - `client.py`: Defines `TradingClientInterface` used by the runner (Hyperliquid client is a concrete implementation)
+  - `models.py`: Common enums and types for strategy outputs (e.g., `StrategyOrder`)
+
+- **Interfaces**:
+  - `Strategy` (abstract):
+    - `assets: list[str]` — symbols managed by the strategy
+    - `interval: Literal["1h","4h","1d","1w","1mo"]` — tick granularity
+    - `position_manager: PositionManager` — portfolio of cash and long/short positions
+    - `indicators: dict[str, BaseIndicator]` — technical indicators used by the strategy
+    - `async def on_start(self) -> None` — optional initialization
+    - `async def tick(self, as_of: datetime, historical: dict[str, pd.DataFrame]) -> list[TradingSignal]` — compute indicators from historical data up to `as_of` and emit signals; mockable
+    - `async def on_stop(self) -> None` — optional finalization
+
+  - `TradingClientInterface`:
+    - `async def place_order(symbol: str, side: Literal["BUY","SELL"], order_type: Literal["MARKET","LIMIT"], quantity: float, price: Optional[float] = None) -> Order`
+    - `async def cancel_order(order_id: str) -> bool`
+    - `async def get_positions() -> list[Position]`
+    - Must be fully mockable for unit tests
+
+- **Runner Orchestration (`StrategyRunner`)**:
+  - Iterates chronologically across ticks derived from available historical data (or a configured date range)
+  - On each tick `t`, loads/slices OHLCV data per asset to include data up to and including `t`
+  - Invokes `strategy.tick(t, sliced_historical)` to obtain `TradingSignal`s per asset
+  - Converts signals to position-sized orders using `PositionManager` and executes via `TradingClientInterface`
+  - On successful executions, updates positions via `PositionManager`
+  - Supports two modes: `backtest` (no live side effects; uses simulated fills) and `live` (uses concrete exchange client)
+  - All dependencies (`data`, `position_manager`, `trading_client`) are injectable/mocked
+
+- **Backtesting Behavior**:
+  - For each tick, the strategy only sees historical data up to that time
+  - Execution uses provided slippage/fee models and fill rules
+  - Produces a run report with P&L, win rate, drawdowns, and per-trade logs
+
 - **manager.py**: Track positions, calculate P&L, manage risk, portfolio metrics
 - **kelly_criterion.py**: Calculate optimal position sizes using Kelly criterion with risk adjustments
 - **models.py**: Position and sizing models with comprehensive properties and methods
@@ -268,11 +311,23 @@ BTC-USD,2025-01-01T01:00:00+00:00,45200.0,45300.0,45100.0,45150.0,980000.0,coing
 ## 6. Key Implementation Features
 
 ### Main Bot Features (main.py)
-- **Trading cycle**: 60-second intervals with 30-second error recovery
+- **Strategy-based orchestration**: Uses `StrategyRunner` with an injected `Strategy` instance
+- **Trading cycle**: 60-second intervals with 30-second error recovery for live mode
 - **Signal validation**: Minimum signal strength threshold (0.3) for trade execution
 - **Signal cooldown**: 5-minute cooldown between signals to prevent overtrading
 - **Async context managers**: Proper resource management for API clients
 - **Graceful shutdown**: Signal handlers for SIGINT and SIGTERM
+- **Behavioral parity**: Refactor preserves existing external behavior while delegating to strategy abstractions
+
+#### HypeBot Refactor Plan (no code changes yet)
+- Construct dependencies (`DataClient`, `DataStorage`, `PositionManager`, indicator instances, `TradingClientInterface` implementation)
+- Instantiate a concrete `Strategy` with injected, mockable dependencies
+- Create `StrategyRunner` with:
+  - `mode = live`
+  - the constructed trading client (Hyperliquid-backed)
+  - the same cooldown, strength threshold, and logging behavior as current flow
+- Delegate the main loop to the runner; preserve signal handling and cleanup
+- Maintain existing configuration and environment variable usage
 
 ### RSI Calculator Features (indicators/rsi_calculator.py)
 - **Crossover signals**: Moderate strength (0.7) for threshold crossover signals
@@ -309,6 +364,13 @@ BTC-USD,2025-01-01T01:00:00+00:00,45200.0,45300.0,45100.0,45150.0,980000.0,coing
 - **Caching (optional)**: TTL cache for spot/market endpoints, configurable via `DATA_CACHE_TTL_S`
 
 ### Exchange Client Features (exchange/hyperliquid_client.py)
+### Strategy Runner Features (strategy/runner.py)
+- **Time-sliced data**: Provides per-asset DataFrames up to the current tick
+- **Mode selection**: `backtest` with simulated fills vs `live` using real client
+- **Order pipeline**: Signals → sizing via `PositionManager` → place/cancel → update positions
+- **Pluggable execution**: Inject custom slippage/fees, execution latency
+- **Deterministic backtests**: Seeded randomness and fixed clock for reproducibility
+
 - **Custom HTTP client**: Direct HTTP implementation for better control over API interactions
 - **Authentication**: HMAC-SHA256 signature generation for API authentication
 - **Order management**: Complete order lifecycle management (place, cancel, status)
@@ -446,6 +508,12 @@ python histprices.py AAPL --output-dir ./my_data --period 1mo --interval 1d
 - Test data client interface conformance and error normalization
 - Test timezone normalization and interval mapping across providers
 - Test histprices.py utility with various parameter combinations
+
+### Strategy and Runner Tests
+- Unit test `Strategy.tick()` implementations with mocked data slices per tick
+- Unit test `StrategyRunner` order pipeline with a mocked `TradingClientInterface`
+- Backtest harness tests: deterministic runs, P&L and trade log validation
+- Integration tests: `HypeBot` with `StrategyRunner` in live mode using mocked clients
 
 ### Integration Tests
 - Test data flow between modules
