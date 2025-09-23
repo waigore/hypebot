@@ -1,14 +1,14 @@
 # Crypto Trading Bot - Feature Setup
 
 ## Overview
-Set up a Python-based crypto trading bot called HypeBot that connects to Hyperliquid exchange, retrieves price data from CoinGecko API, applies technical indicators (RSI), and manages positions using Kelly criterion for position sizing.
+Set up a Python-based crypto trading bot called HypeBot that connects to Hyperliquid exchange, retrieves price data from a configurable data provider (CoinGecko or Yahoo Finance via yfinance), applies technical indicators (RSI), and manages positions using Kelly criterion for position sizing.
 
 ## 1. Requirements Definition
 
 ### Feature Scope and Goals
 - **Primary Goal**: Automated crypto trading bot with RSI-based signals and Kelly criterion position sizing
 - **Exchange Integration**: Hyperliquid using custom HTTP client
-- **Data Source**: CoinGecko API for price data
+- **Data Source**: Configurable data provider (CoinGecko API or Yahoo Finance via yfinance) for price data
 - **Storage**: Local CSV persistence with Pandas
 - **Technical Analysis**: RSI indicator with pandas calculations
 - **Position Management**: Kelly criterion for position sizing
@@ -28,6 +28,8 @@ Set up a Python-based crypto trading bot called HypeBot that connects to Hyperli
 - [ ] Bot executes trades based on signals with proper position sizing
 - [ ] All modules are separated and can work independently
 - [ ] Error handling and logging are implemented
+- [ ] Data provider is configurable (CoinGecko or Yahoo Finance) without caller code changes
+- [ ] Historical OHLCV retrieval returns standardized DataFrame shape and UTC timestamps
 
 ## 2. Technical Approach
 
@@ -39,7 +41,7 @@ hypebot/
 ├── main.py                  # Main bot orchestration
 ├── config.py                # Configuration settings
 ├── exchange/                # Hyperliquid integration
-├── data/                    # CoinGecko API and storage
+├── data/                    # Data providers (CoinGecko/yfinance) and storage
 ├── indicators/              # RSI calculation and signals
 ├── position/                # Position management and Kelly criterion
 └── tests/                   # Unit and integration tests
@@ -47,7 +49,7 @@ hypebot/
 
 ### Key Technologies
 - **Exchange**: Custom Hyperliquid HTTP client (httpx)
-- **Price Data**: CoinGecko API (httpx)
+- **Price Data**: CoinGecko API (httpx) and Yahoo Finance via `yfinance`
 - **Storage**: Pandas with CSV persistence
 - **Technical Analysis**: pandas, numpy for RSI calculations
 - **Position Sizing**: Custom Kelly criterion implementation
@@ -67,6 +69,7 @@ numpy>=1.24.0
 
 # API Client
 httpx>=0.24.0
+yfinance>=0.2.50
 
 # Configuration
 python-dotenv>=1.0.0
@@ -93,6 +96,19 @@ HYPERLIQUID_TESTNET=true
 COINGECKO_API_KEY=your_coingecko_api_key
 COINGECKO_BASE_URL=https://api.coingecko.com/api/v3
 COINGECKO_RATE_LIMIT=50
+
+# Data Provider Selection
+DATA_PROVIDER=coingecko  # or yfinance
+
+# Generic Data Settings
+DATA_CACHE_TTL_S=0
+DATA_DEFAULT_INTERVAL=1d
+DATA_DEFAULT_LOOKBACK_DAYS=365
+
+# Yahoo Finance Configuration
+YF_RATE_LIMIT_RPS=5
+YF_MAX_RETRIES=3
+YF_TIMEOUT_S=30
 
 # Trading Configuration
 DEFAULT_SYMBOL=BTC
@@ -129,7 +145,7 @@ class PriceData:
     price: float
     volume_24h: float
     market_cap: float
-    source: str = "coingecko"
+    source: str = "provider"  # set by the selected data provider
 ```
 
 #### Market Data Model (data/models.py)
@@ -145,7 +161,7 @@ class MarketData:
     price_change_percentage_24h: float
     high_24h: float
     low_24h: float
-    source: str = "coingecko"
+    source: str = "provider"  # set by the selected data provider
 ```
 
 #### Trading Signal Model (indicators/models.py)
@@ -199,9 +215,12 @@ class PositionSize:
 - **models.py**: Order, trade, and account balance models
 
 ### Data Module (data/)
-- **coingecko_client.py**: Fetch price data from CoinGecko API with rate limiting
-- **storage.py**: CRUD operations for price data using Pandas with CSV persistence
-- **models.py**: Price data and market data models with serialization methods
+- **client.py**: Provider-agnostic interface and factory for data clients
+- **providers/**:
+  - **coingecko_client.py**: CoinGecko implementation of the data client with rate limiting
+  - **yfinance_client.py**: Yahoo Finance implementation via `yfinance` (thread-wrapped for async API)
+- **storage.py**: CRUD operations for price and market data using Pandas with CSV persistence
+- **models.py**: Price, market, and OHLCV models with serialization methods
 
 ### Indicators Module (indicators/)
 - **rsi_calculator.py**: Calculate RSI using pandas with Wilder's smoothing, generate buy/sell signals with crossover detection
@@ -244,6 +263,14 @@ class PositionSize:
 - **Duplicate handling**: Automatic removal of duplicate records based on symbol and timestamp
 - **Data filtering**: Symbol and date range filtering for historical data retrieval
 - **Multiple data types**: Support for price data, market data, positions, trades, and signals
+
+### Data Client Features (data/client.py and providers/)
+- **Provider selection**: `DATA_PROVIDER` config selects CoinGecko or Yahoo Finance
+- **Unified async interface**: `authenticate`, `close`, `get_supported_symbols`, `get_spot_price`, `get_market_data`, `get_historical_prices`
+- **Historical data**: Standardized OHLCV DataFrame with columns `open,high,low,close,volume`, UTC index, `attrs` metadata
+- **Rate limiting and retries**: Token bucket RPS guard, exponential backoff with jitter, provider-specific handling
+- **Error normalization**: Common exceptions (`DataNotFoundError`, `RateLimitError`, `ProviderAuthError`, `ProviderTemporaryError`, `ProviderPermanentError`, `InvalidSymbolError`, `TimeoutError`)
+- **Caching (optional)**: TTL cache for spot/market endpoints, configurable via `DATA_CACHE_TTL_S`
 
 ### Exchange Client Features (exchange/hyperliquid_client.py)
 - **Custom HTTP client**: Direct HTTP implementation for better control over API interactions
@@ -298,12 +325,15 @@ pytest hypebot/tests/
 - Test each module independently with mocked dependencies
 - Test RSI calculations with known datasets
 - Test Kelly criterion with various return scenarios
-- Test API clients with mock responses
+- Test API clients with mock responses (both CoinGecko and Yahoo Finance providers)
+- Test data client interface conformance and error normalization
+- Test timezone normalization and interval mapping across providers
 
 ### Integration Tests
 - Test data flow between modules
 - Test end-to-end signal generation and position sizing
 - Test error handling and recovery scenarios
+- Test historical OHLCV retrieval from each provider (optional live tests behind `RUN_LIVE_DATA_TESTS=1`)
 
 ## Feature Setup Checklist
 - [x] Requirements documented
@@ -326,7 +356,7 @@ pytest hypebot/tests/
 1. ✅ Create feature branch: `git checkout -b feature/hypebot`
 2. ✅ Set up development environment with dependencies
 3. ✅ Implement exchange module for Hyperliquid integration
-4. ✅ Implement data module for CoinGecko API and Pandas storage
+4. ✅ Implement data module with provider-agnostic client (CoinGecko/yfinance) and Pandas storage
 5. ✅ Implement indicators module with RSI calculator
 6. ✅ Implement position module with Kelly criterion
 7. ✅ Create main orchestration script
@@ -338,7 +368,7 @@ pytest hypebot/tests/
 - The bot is implemented as a complete package with proper Python packaging
 - Uses async/await patterns for API calls and trading operations
 - Includes comprehensive error handling and logging
-- Supports both pipenv and pip installation methods
+- Supports both pipenv installation method only
 - Has extensive configuration options through environment variables
 - Includes signal cooldown and risk management features
 - Implements proper position tracking with P&L calculations

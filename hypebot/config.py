@@ -48,6 +48,44 @@ class CoinGeckoConfig:
 
 
 @dataclass
+class YahooFinanceConfig:
+    """Yahoo Finance API configuration."""
+    
+    rate_limit_rps: int = 5  # requests per second
+    max_retries: int = 3
+    timeout_s: int = 30
+    
+    @classmethod
+    def from_env(cls) -> "YahooFinanceConfig":
+        """Create config from environment variables."""
+        return cls(
+            rate_limit_rps=int(os.getenv("YF_RATE_LIMIT_RPS", "5")),
+            max_retries=int(os.getenv("YF_MAX_RETRIES", "3")),
+            timeout_s=int(os.getenv("YF_TIMEOUT_S", "30"))
+        )
+
+
+@dataclass
+class DataConfig:
+    """Data provider configuration."""
+    
+    provider: str = "yfinance"  # Default to yfinance as per spec
+    cache_ttl_s: int = 0
+    default_interval: str = "1d"
+    default_lookback_days: int = 365
+    
+    @classmethod
+    def from_env(cls) -> "DataConfig":
+        """Create config from environment variables."""
+        return cls(
+            provider=os.getenv("DATA_PROVIDER", "yfinance"),
+            cache_ttl_s=int(os.getenv("DATA_CACHE_TTL_S", "0")),
+            default_interval=os.getenv("DATA_DEFAULT_INTERVAL", "1d"),
+            default_lookback_days=int(os.getenv("DATA_DEFAULT_LOOKBACK_DAYS", "365"))
+        )
+
+
+@dataclass
 class TradingConfig:
     """Trading configuration."""
     
@@ -103,6 +141,8 @@ class Config:
     
     hyperliquid: HyperliquidConfig
     coingecko: CoinGeckoConfig
+    yahoo_finance: YahooFinanceConfig
+    data: DataConfig
     trading: TradingConfig
     database: DatabaseConfig
     log_level: str = "INFO"
@@ -114,6 +154,8 @@ class Config:
         return cls(
             hyperliquid=HyperliquidConfig.from_env(),
             coingecko=CoinGeckoConfig.from_env(),
+            yahoo_finance=YahooFinanceConfig.from_env(),
+            data=DataConfig.from_env(),
             trading=TradingConfig.from_env(),
             database=DatabaseConfig.from_env(),
             log_level=os.getenv("LOG_LEVEL", "INFO"),

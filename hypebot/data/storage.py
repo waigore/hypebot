@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 import pandas as pd
 
-from .models import PriceData, MarketData
+from .models import PriceData, MarketData, OHLCVData
 from ..config import DatabaseConfig
 
 
@@ -305,9 +305,150 @@ class DataStorage:
                 price=latest['price'],
                 volume_24h=latest['volume_24h'],
                 market_cap=latest['market_cap'],
-                source=latest.get('source', 'coingecko')
+                source=latest.get('source', 'provider')
             )
             
         except Exception as e:
             logger.error(f"Error getting latest price for {symbol}: {e}")
+            return None
+    
+    def save_ohlcv_data(self, ohlcv_data: List[OHLCVData], append: bool = True) -> bool:
+        """Save OHLCV data to CSV file."""
+        try:
+            if not ohlcv_data:
+                return True
+            
+            # Convert to DataFrame
+            df = pd.DataFrame([data.to_dict() for data in ohlcv_data])
+            
+            file_path = self._get_file_path("ohlcv_data.csv")
+            
+            if append and os.path.exists(file_path):
+                # Load existing data and append
+                existing_df = pd.read_csv(file_path)
+                existing_df['timestamp'] = pd.to_datetime(existing_df['timestamp'])
+                combined_df = pd.concat([existing_df, df], ignore_index=True)
+                # Remove duplicates based on symbol and timestamp
+                combined_df = combined_df.drop_duplicates(subset=['symbol', 'timestamp'], keep='last')
+                combined_df.to_csv(file_path, index=False)
+            else:
+                df.to_csv(file_path, index=False)
+            
+            logger.info(f"Saved {len(ohlcv_data)} OHLCV data records")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error saving OHLCV data: {e}")
+            return False
+    
+    def load_ohlcv_data(
+        self, 
+        symbol: Optional[str] = None, 
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> pd.DataFrame:
+        """Load OHLCV data from CSV file."""
+        try:
+            file_path = self._get_file_path("ohlcv_data.csv")
+            
+            if not os.path.exists(file_path):
+                logger.warning(f"OHLCV data file not found: {file_path}")
+                return pd.DataFrame()
+            
+            df = pd.read_csv(file_path)
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            
+            # Filter by symbol if provided
+            if symbol:
+                df = df[df['symbol'] == symbol.upper()]
+            
+            # Filter by date range if provided
+            if start_date:
+                df = df[df['timestamp'] >= start_date]
+            if end_date:
+                df = df[df['timestamp'] <= end_date]
+            
+            # Sort by timestamp
+            df = df.sort_values('timestamp')
+            
+            logger.info(f"Loaded {len(df)} OHLCV data records")
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error loading OHLCV data: {e}")
+            return pd.DataFrame()
+    
+    def get_historical_ohlcv_data(
+        self, 
+        symbol: str,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> pd.DataFrame:
+        """Get historical OHLCV data with standardized DataFrame shape and UTC timestamps."""
+        try:
+            # Load OHLCV data
+            df = self.load_ohlcv_data(symbol=symbol, start_date=start_date, end_date=end_date)
+            
+            if df.empty:
+                logger.warning(f"No OHLCV data found for symbol {symbol}")
+                return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+            
+            # Create standardized DataFrame with timestamp as index
+            ohlcv_df = df.set_index('timestamp')
+            
+            # Select only OHLCV columns
+            ohlcv_columns = ['open', 'high', 'low', 'close', 'volume']
+            if all(col in ohlcv_df.columns for col in ohlcv_columns):
+                ohlcv_df = ohlcv_df[ohlcv_columns]
+            else:
+                logger.error(f"Missing required OHLCV columns: {ohlcv_columns}")
+                return pd.DataFrame(columns=ohlcv_columns)
+            
+            # Ensure UTC timezone
+            if ohlcv_df.index.tz is None:
+                ohlcv_df.index = ohlcv_df.index.tz_localize('UTC')
+            else:
+                ohlcv_df.index = ohlcv_df.index.tz_convert('UTC')
+            
+            # Sort by timestamp
+            ohlcv_df = ohlcv_df.sort_index()
+            
+            # Add metadata
+            ohlcv_df.attrs = {
+                "symbol": symbol.upper(),
+                "source": df.iloc[0].get('source', 'provider') if not df.empty else 'unknown',
+                "data_type": "ohlcv",
+                "total_records": len(ohlcv_df),
+                "start_date": ohlcv_df.index.min() if not ohlcv_df.empty else None,
+                "end_date": ohlcv_df.index.max() if not ohlcv_df.empty else None
+            }
+            
+            logger.info(f"Retrieved {len(ohlcv_df)} historical OHLCV records for {symbol}")
+            return ohlcv_df
+            
+        except Exception as e:
+            logger.error(f"Error getting historical OHLCV data for {symbol}: {e}")
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    
+    def get_latest_ohlcv_data(self, symbol: str) -> Optional[OHLCVData]:
+        """Get the latest OHLCV data for a symbol."""
+        try:
+            df = self.load_ohlcv_data(symbol=symbol)
+            if df.empty:
+                return None
+            
+            latest = df.iloc[-1]
+            return OHLCVData(
+                symbol=latest['symbol'],
+                timestamp=latest['timestamp'],
+                open=latest['open'],
+                high=latest['high'],
+                low=latest['low'],
+                close=latest['close'],
+                volume=latest['volume'],
+                source=latest.get('source', 'provider')
+            )
+            
+        except Exception as e:
+            logger.error(f"Error getting latest OHLCV data for {symbol}: {e}")
             return None
