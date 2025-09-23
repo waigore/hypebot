@@ -35,7 +35,7 @@ Set up a Python-based crypto trading bot called HypeBot that connects to Hyperli
 ## 2. Technical Approach
 
 ### Architecture Overview
-The bot is built as 4 separate modules with async/await patterns:
+The bot is built as 4 separate modules with async/await patterns, plus utility programs:
 
 ```
 hypebot/
@@ -45,7 +45,8 @@ hypebot/
 ├── data/                    # Data providers (CoinGecko/yfinance) and storage
 ├── indicators/              # RSI calculation and signals
 ├── position/                # Position management and Kelly criterion
-└── tests/                   # Unit and integration tests
+├── tests/                   # Unit and integration tests
+└── histprices.py            # Historical price data utility (root directory)
 ```
 
 ### Key Technologies
@@ -56,6 +57,7 @@ hypebot/
 - **Position Sizing**: Custom Kelly criterion implementation
 - **Configuration**: python-dotenv for environment variables
 - **Async Operations**: asyncio for concurrent operations
+- **Utility Programs**: Command-line tools for data retrieval and management
 
 ## 3. Dependencies Configuration
 
@@ -337,6 +339,9 @@ cp hypebot/env.example .env
 python -m hypebot
 # Or
 hypebot
+
+# Run the historical price utility
+python histprices.py BTC-USD --period 1y --interval 1d
 ```
 
 ### Development Setup
@@ -353,7 +358,85 @@ mypy .
 pytest hypebot/tests/
 ```
 
-## 8. Testing Strategy
+## 8. Utility Programs
+
+### Historical Price Data Utility (histprices.py)
+
+A standalone command-line utility for retrieving and persisting historical price data using the hypebot data infrastructure.
+
+#### Purpose
+- Retrieve historical OHLCV data for specified symbols
+- Persist data locally using the organized CSV storage system
+- Support multiple data providers (yfinance default, CoinGecko)
+- Provide flexible time period and interval configuration
+
+#### Command Line Interface
+```bash
+python histprices.py <symbol> [--period PERIOD] [--interval INTERVAL] [--provider PROVIDER] [--output-dir OUTPUT_DIR]
+```
+
+#### Arguments and Options
+- **symbol** (required): Trading symbol (e.g., "BTC-USD", "ETH-USD", "AAPL")
+- **--period, -p** (optional): Time period for data retrieval (default: "1y")
+  - Valid values: "1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"
+- **--interval, -i** (optional): Data granularity/interval (default: "1d")
+  - Valid values: "1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"
+- **--provider, -pr** (optional): Data provider selection (default: "yfinance")
+  - Valid values: "yfinance", "coingecko"
+- **--output-dir, -o** (optional): Custom output directory (default: uses DATA_DIR from config)
+- **--help, -h**: Display help message
+
+#### Usage Examples
+```bash
+# Basic usage - get 1 year of daily BTC-USD data
+python histprices.py BTC-USD
+
+# Get 6 months of hourly ETH data
+python histprices.py ETH-USD --period 6mo --interval 1h
+
+# Use CoinGecko provider for crypto data
+python histprices.py BTC-USD --provider coingecko --period 2y
+
+# Custom output directory
+python histprices.py AAPL --output-dir ./my_data --period 1mo --interval 1d
+```
+
+#### Implementation Details
+- **Data Provider Integration**: Uses the existing `DataClientInterface` and factory pattern
+- **Storage Integration**: Leverages `DataStorage` class for organized CSV persistence
+- **Configuration**: Reads from environment variables and config files (same as main bot)
+- **Error Handling**: Comprehensive error handling with user-friendly messages
+- **Progress Indication**: Shows progress for long-running operations
+- **Data Validation**: Validates symbol format and parameter combinations
+
+#### File Organization
+- **Input Validation**: Validates symbol format and parameter combinations
+- **Provider Selection**: Uses `DataClientFactory` to create appropriate client
+- **Data Retrieval**: Calls `get_historical_ohlcv()` method with specified parameters
+- **Storage**: Uses `DataStorage.save_historical_ohlcv()` for organized CSV storage
+- **Output**: Provides summary of retrieved data (records count, date range, file location)
+
+#### Error Handling
+- **Invalid Symbol**: Clear error message for unsupported symbols
+- **Provider Errors**: Handles rate limiting, authentication, and temporary failures
+- **Parameter Validation**: Validates period/interval combinations
+- **Storage Errors**: Handles file system and permission issues
+- **Network Issues**: Provides retry logic and timeout handling
+
+#### Output Format
+- **Console Output**: Progress indicators and summary statistics
+- **File Storage**: Organized CSV files following existing naming convention
+- **Logging**: Configurable logging to file and console
+- **Summary**: Final report with data retrieval statistics
+
+#### Integration with Existing Modules
+- **Data Client**: Uses existing `DataClientInterface` implementations
+- **Storage**: Leverages `DataStorage` for consistent file organization
+- **Configuration**: Uses shared `Config` classes and environment variables
+- **Models**: Utilizes `OHLCVData` models for data consistency
+- **Logging**: Integrates with existing logging infrastructure
+
+## 9. Testing Strategy
 
 ### Unit Tests
 - Test each module independently with mocked dependencies
@@ -362,12 +445,14 @@ pytest hypebot/tests/
 - Test API clients with mock responses (both CoinGecko and Yahoo Finance providers)
 - Test data client interface conformance and error normalization
 - Test timezone normalization and interval mapping across providers
+- Test histprices.py utility with various parameter combinations
 
 ### Integration Tests
 - Test data flow between modules
 - Test end-to-end signal generation and position sizing
 - Test error handling and recovery scenarios
 - Test historical OHLCV retrieval from each provider (optional live tests behind `RUN_LIVE_DATA_TESTS=1`)
+- Test histprices.py utility integration with data providers and storage
 
 ## Feature Setup Checklist
 - [x] Requirements documented
