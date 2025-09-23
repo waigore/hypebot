@@ -9,7 +9,7 @@ from typing import Optional, Dict, Any
 import pandas as pd
 
 from .config import Config
-from .data import CoinGeckoClient, DataStorage
+from .data import DataClient, DataStorage
 from .indicators import RSICalculator
 from .position import PositionManager
 from .exchange import HyperliquidClient
@@ -37,7 +37,7 @@ class HypeBot:
         self.running = False
         
         # Initialize components
-        self.coingecko_client = CoinGeckoClient(config.coingecko)
+        self.data_client = DataClient(config)
         self.data_storage = DataStorage(config.database)
         self.rsi_calculator = RSICalculator(
             period=config.trading.rsi_period,
@@ -67,7 +67,7 @@ class HypeBot:
             logger.info("Initializing HypeBot...")
             
             # Test CoinGecko connection
-            async with self.coingecko_client as client:
+            async with self.data_client as client:
                 price_data = await client.get_price(self.current_symbol)
                 if not price_data:
                     logger.error("Failed to connect to CoinGecko API")
@@ -122,7 +122,7 @@ class HypeBot:
         """Execute one trading cycle."""
         try:
             # Get current price data
-            async with self.coingecko_client as client:
+            async with self.data_client as client:
                 price_data = await client.get_price(self.current_symbol)
                 if not price_data:
                     logger.warning(f"Failed to get price data for {self.current_symbol}")
@@ -303,7 +303,7 @@ class HypeBot:
             
             for position in positions:
                 # Get current price
-                async with self.coingecko_client as client:
+                async with self.data_client as client:
                     price_data = await client.get_price(position.symbol)
                     if price_data:
                         self.position_manager.update_position_price(

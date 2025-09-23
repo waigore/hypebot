@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timedelta
 
 from hypebot.config import Config
-from hypebot.data import CoinGeckoClient, DataStorage
+from hypebot.data import DataClient, DataStorage
 from hypebot.indicators import RSICalculator
 from hypebot.position import PositionManager
 
@@ -21,7 +21,7 @@ async def example_usage():
     config = Config.from_env()
     
     # Initialize components
-    coingecko_client = CoinGeckoClient(config.coingecko)
+    data_client = DataClient(config)
     data_storage = DataStorage(config.database)
     rsi_calculator = RSICalculator(
         period=config.trading.rsi_period,
@@ -33,8 +33,8 @@ async def example_usage():
     try:
         # Example 1: Get price data
         logger.info("=== Getting Price Data ===")
-        async with coingecko_client as client:
-            price_data = await client.get_price("BTC")
+        async with data_client as client:
+            price_data = await client.get_spot_price("BTC")
             if price_data:
                 logger.info(f"BTC Price: ${price_data.price:,.2f}")
                 logger.info(f"Volume 24h: ${price_data.volume_24h:,.2f}")

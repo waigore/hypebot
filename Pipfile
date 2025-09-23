@@ -17,6 +17,7 @@ python-dotenv = ">=1.0.0"
 pytest = "*"
 pytest-asyncio = "*"
 pytest-mock = "*"
+yfinance = "*"
 
 [dev-packages]
 # Testing
