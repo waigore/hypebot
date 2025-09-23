@@ -9,7 +9,7 @@ Set up a Python-based crypto trading bot called HypeBot that connects to Hyperli
 - **Primary Goal**: Automated crypto trading bot with RSI-based signals and Kelly criterion position sizing
 - **Exchange Integration**: Hyperliquid using custom HTTP client
 - **Data Source**: Configurable data provider (CoinGecko API or Yahoo Finance via yfinance) for price data
-- **Storage**: Local CSV persistence with Pandas
+- **Storage**: Local CSV persistence for historical OHLCV data organized by symbol, year, and granularity
 - **Technical Analysis**: RSI indicator with pandas calculations
 - **Position Management**: Kelly criterion for position sizing
 
@@ -18,11 +18,11 @@ Set up a Python-based crypto trading bot called HypeBot that connects to Hyperli
 2. **As a trader**, I want real-time price data from CoinGecko API so I can make informed trading decisions
 3. **As a trader**, I want RSI signals (long/short) so I can automate trading based on technical analysis
 4. **As a trader**, I want Kelly criterion position sizing so I can optimize risk-adjusted returns
-5. **As a trader**, I want local price data storage so I can analyze historical performance
+5. **As a trader**, I want organized historical OHLCV data storage so I can analyze performance and backtest strategies
 
 ### Acceptance Criteria
 - [ ] Bot successfully connects to Hyperliquid exchange
-- [ ] Price data is retrieved and stored locally via Pandas
+- [ ] Historical OHLCV data is retrieved and stored in organized CSV files by symbol, year, and granularity
 - [ ] RSI indicator calculates and emits buy/sell signals
 - [ ] Kelly criterion calculates optimal position sizes
 - [ ] Bot executes trades based on signals with proper position sizing
@@ -30,6 +30,7 @@ Set up a Python-based crypto trading bot called HypeBot that connects to Hyperli
 - [ ] Error handling and logging are implemented
 - [ ] Data provider is configurable (CoinGecko or Yahoo Finance) without caller code changes
 - [ ] Historical OHLCV retrieval returns standardized DataFrame shape and UTC timestamps
+- [ ] CSV storage supports bidirectional conversion between OHLCVData models and pandas DataFrames
 
 ## 2. Technical Approach
 
@@ -50,7 +51,7 @@ hypebot/
 ### Key Technologies
 - **Exchange**: Custom Hyperliquid HTTP client (httpx)
 - **Price Data**: CoinGecko API (httpx) and Yahoo Finance via `yfinance`
-- **Storage**: Pandas with CSV persistence
+- **Storage**: Organized CSV files with pandas DataFrame conversion for historical OHLCV data
 - **Technical Analysis**: pandas, numpy for RSI calculations
 - **Position Sizing**: Custom Kelly criterion implementation
 - **Configuration**: python-dotenv for environment variables
@@ -120,12 +121,10 @@ MAX_POSITION_SIZE=0.1
 MIN_POSITION_SIZE=0.001
 RISK_FREE_RATE=0.02
 
-# Database Configuration
+# Storage Configuration
 DATA_DIR=data
-PRICE_DATA_FILE=price_data.csv
-POSITIONS_FILE=positions.csv
-TRADES_FILE=trades.csv
-SIGNALS_FILE=signals.csv
+HISTORICAL_DATA_DIR=historical
+CSV_FILE_PREFIX=ohlcv_
 
 # Logging Configuration
 LOG_LEVEL=INFO
@@ -208,7 +207,40 @@ class PositionSize:
     risk_level: Literal["LOW", "MEDIUM", "HIGH"]
 ```
 
-## 5. Module Specifications
+## 5. Storage Specification
+
+### Historical Data Storage
+
+The storage system is designed specifically for historical OHLCV data with the following characteristics:
+
+#### File Organization
+- **Directory Structure**: `{DATA_DIR}/{HISTORICAL_DATA_DIR}/`
+- **File Naming Convention**: `{SYMBOL}_{YEAR}_{GRANULARITY}.csv`
+  - Example: `BTC-USD_2025_1d.csv` for daily BTC-USD price data for 2025
+  - Example: `ETH-USD_2024_1h.csv` for hourly ETH-USD price data for 2024
+- **Granularity Formats**: `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`, `1w`
+
+#### CSV Format
+CSV files match the OHLCVData model fields exactly:
+```csv
+symbol,timestamp,open,high,low,close,volume,source
+BTC-USD,2025-01-01T00:00:00+00:00,45000.0,45500.0,44800.0,45200.0,1250000.0,coingecko
+BTC-USD,2025-01-01T01:00:00+00:00,45200.0,45300.0,45100.0,45150.0,980000.0,coingecko
+```
+
+#### DataFrame Conversion
+- **From CSV to DataFrame**: Load CSV with UTC timestamp index and OHLCV columns
+- **From DataFrame to CSV**: Save with proper timestamp formatting and field ordering
+- **Metadata Preservation**: Symbol, source, and data type metadata stored in DataFrame.attrs
+- **Timezone Handling**: All timestamps normalized to UTC
+
+#### Storage Operations
+- **Write**: Append new OHLCV data to appropriate CSV file based on symbol, year, granularity
+- **Read**: Load specific symbol/year/granularity combinations into pandas DataFrame
+- **Update**: Handle duplicate records by timestamp (last write wins)
+- **Query**: Support date range filtering and symbol filtering
+
+## 6. Module Specifications
 
 ### Exchange Module (exchange/)
 - **hyperliquid_client.py**: Custom HTTP client for Hyperliquid API with authentication, order placement, position queries
@@ -216,11 +248,10 @@ class PositionSize:
 
 ### Data Module (data/)
 - **client.py**: Provider-agnostic interface and factory for data clients
-- **providers/**:
-  - **coingecko_client.py**: CoinGecko implementation of the data client with rate limiting
-  - **yfinance_client.py**: Yahoo Finance implementation via `yfinance` (thread-wrapped for async API)
-- **storage.py**: CRUD operations for price and market data using Pandas with CSV persistence
-- **models.py**: Price, market, and OHLCV models with serialization methods
+- **coingecko_client.py**: CoinGecko implementation of the data client with rate limiting
+- **yfinance_client.py**: Yahoo Finance implementation via `yfinance` (thread-wrapped for async API)
+- **storage.py**: Historical OHLCV data storage with organized CSV files and DataFrame conversion
+- **models.py**: Price, market, and OHLCV models with CSV serialization and DataFrame conversion methods
 
 ### Indicators Module (indicators/)
 - **rsi_calculator.py**: Calculate RSI using pandas with Wilder's smoothing, generate buy/sell signals with crossover detection
@@ -260,9 +291,12 @@ class PositionSize:
 - **Confidence adjustment**: Signal strength and confidence-based position size adjustments
 
 ### Data Storage Features (data/storage.py)
+- **Organized CSV storage**: Historical OHLCV data stored in files organized by symbol, year, and granularity
+- **File naming convention**: `{SYMBOL}_{YEAR}_{GRANULARITY}.csv` format for easy data management
+- **DataFrame conversion**: Bidirectional conversion between OHLCVData models and pandas DataFrames
 - **Duplicate handling**: Automatic removal of duplicate records based on symbol and timestamp
-- **Data filtering**: Symbol and date range filtering for historical data retrieval
-- **Multiple data types**: Support for price data, market data, positions, trades, and signals
+- **Data filtering**: Symbol, year, granularity, and date range filtering for historical data retrieval
+- **Metadata preservation**: Symbol, source, and data type information preserved in DataFrame.attrs
 
 ### Data Client Features (data/client.py and providers/)
 - **Provider selection**: `DATA_PROVIDER` config selects CoinGecko or Yahoo Finance
@@ -372,7 +406,7 @@ pytest hypebot/tests/
 - Has extensive configuration options through environment variables
 - Includes signal cooldown and risk management features
 - Implements proper position tracking with P&L calculations
-- Uses CSV files for data persistence with Pandas integration
+- Uses organized CSV files for historical OHLCV data persistence with pandas DataFrame conversion
 - Custom Hyperliquid client implementation for better API control
 - Graceful shutdown handling with signal handlers
 - Real-time position price updates

@@ -122,6 +122,8 @@ class DatabaseConfig:
     positions_file: str = "positions.csv"
     trades_file: str = "trades.csv"
     signals_file: str = "signals.csv"
+    historical_data_dir: str = "historical"
+    csv_file_prefix: str = "ohlcv_"
     
     @classmethod
     def from_env(cls) -> "DatabaseConfig":
@@ -131,7 +133,9 @@ class DatabaseConfig:
             price_data_file=os.getenv("PRICE_DATA_FILE", "price_data.csv"),
             positions_file=os.getenv("POSITIONS_FILE", "positions.csv"),
             trades_file=os.getenv("TRADES_FILE", "trades.csv"),
-            signals_file=os.getenv("SIGNALS_FILE", "signals.csv")
+            signals_file=os.getenv("SIGNALS_FILE", "signals.csv"),
+            historical_data_dir=os.getenv("HISTORICAL_DATA_DIR", "historical"),
+            csv_file_prefix=os.getenv("CSV_FILE_PREFIX", "ohlcv_")
         )
 
 

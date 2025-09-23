@@ -271,7 +271,7 @@ class TestDataStorage:
         ]
         
         # Save data
-        success = self.storage.save_ohlcv_data(ohlcv_data)
+        success = self.storage.save_ohlcv_data(ohlcv_data, granularity="1d")
         assert success
         
         # Load data
@@ -289,10 +289,10 @@ class TestDataStorage:
             OHLCVData("ETH", datetime.utcnow(), 2900.0, 3100.0, 2850.0, 3000.0, 500000.0)
         ]
         
-        self.storage.save_ohlcv_data(ohlcv_data)
+        self.storage.save_ohlcv_data(ohlcv_data, granularity="1h")
         
         # Load only BTC data
-        btc_data = self.storage.load_ohlcv_data(symbol="BTC")
+        btc_data = self.storage.load_ohlcv_data(symbol="BTC", granularity="1h")
         assert len(btc_data) == 1
         assert btc_data.iloc[0]["symbol"] == "BTC"
         assert btc_data.iloc[0]["open"] == 49000.0
@@ -307,10 +307,11 @@ class TestDataStorage:
             OHLCVData("BTC", now, 50000.0, 52000.0, 49500.0, 51000.0, 1100000.0)
         ]
         
-        self.storage.save_ohlcv_data(ohlcv_data)
+        self.storage.save_ohlcv_data(ohlcv_data, granularity="1d")
         
         # Load data from last day only
         recent_data = self.storage.load_ohlcv_data(
+            granularity="1d",
             start_date=now - timedelta(days=1)
         )
         assert len(recent_data) == 2
@@ -325,10 +326,10 @@ class TestDataStorage:
             OHLCVData("BTC", now, 50000.0, 51000.0, 49500.0, 50500.0, 1200000.0)
         ]
         
-        self.storage.save_ohlcv_data(ohlcv_data)
+        self.storage.save_ohlcv_data(ohlcv_data, granularity="1h")
         
         # Get historical data
-        historical_df = self.storage.get_historical_ohlcv_data("BTC")
+        historical_df = self.storage.get_historical_ohlcv_data("BTC", "1h")
         
         # Check DataFrame structure
         assert not historical_df.empty
@@ -343,6 +344,7 @@ class TestDataStorage:
         assert historical_df.attrs["symbol"] == "BTC"
         assert historical_df.attrs["data_type"] == "ohlcv"
         assert historical_df.attrs["total_records"] == 3
+        assert historical_df.attrs["granularity"] == "1h"
     
     def test_get_historical_ohlcv_data_with_date_range(self):
         """Test getting historical OHLCV data with date range filtering."""
@@ -355,11 +357,12 @@ class TestDataStorage:
             OHLCVData("BTC", now, 49500.0, 50500.0, 49000.0, 50000.0, 1050000.0)
         ]
         
-        self.storage.save_ohlcv_data(ohlcv_data)
+        self.storage.save_ohlcv_data(ohlcv_data, granularity="1d")
         
         # Get data from last 2 days only (excluding today)
         historical_df = self.storage.get_historical_ohlcv_data(
-            "BTC", 
+            "BTC",
+            "1d",
             start_date=now - timedelta(days=2),
             end_date=now - timedelta(days=1)
         )
@@ -369,7 +372,7 @@ class TestDataStorage:
     
     def test_get_historical_ohlcv_data_no_data(self):
         """Test getting historical OHLCV data when no data exists."""
-        historical_df = self.storage.get_historical_ohlcv_data("NONEXISTENT")
+        historical_df = self.storage.get_historical_ohlcv_data("NONEXISTENT", "1h")
         
         assert historical_df.empty
         assert list(historical_df.columns) == ["open", "high", "low", "close", "volume"]
@@ -384,7 +387,7 @@ class TestDataStorage:
             OHLCVData("BTC", now, 50000.0, 51000.0, 49500.0, 50500.0, 1200000.0)
         ]
         
-        self.storage.save_ohlcv_data(ohlcv_data)
+        self.storage.save_ohlcv_data(ohlcv_data, granularity="1h")
         
         # Get latest OHLCV data
         latest = self.storage.get_latest_ohlcv_data("BTC")
@@ -404,13 +407,13 @@ class TestDataStorage:
         ohlcv_data_1 = [
             OHLCVData("BTC", datetime.utcnow(), 49000.0, 50000.0, 48500.0, 49500.0, 1000000.0)
         ]
-        self.storage.save_ohlcv_data(ohlcv_data_1)
+        self.storage.save_ohlcv_data(ohlcv_data_1, granularity="1d")
         
         # Save additional data
         ohlcv_data_2 = [
             OHLCVData("ETH", datetime.utcnow(), 2900.0, 3000.0, 2850.0, 2950.0, 500000.0)
         ]
-        self.storage.save_ohlcv_data(ohlcv_data_2)
+        self.storage.save_ohlcv_data(ohlcv_data_2, granularity="1d")
         
         # Load all data
         all_data = self.storage.load_ohlcv_data()
@@ -472,12 +475,29 @@ class TestDataStorage:
         ]
         
         # Save first batch
-        self.storage.save_ohlcv_data(ohlcv_data_1)
+        self.storage.save_ohlcv_data(ohlcv_data_1, granularity="1h")
         
         # Save second batch (should replace duplicate)
-        self.storage.save_ohlcv_data(ohlcv_data_2)
+        self.storage.save_ohlcv_data(ohlcv_data_2, granularity="1h")
         
         # Load data - should only have one record with updated values
-        loaded_data = self.storage.load_ohlcv_data(symbol="BTC")
+        loaded_data = self.storage.load_ohlcv_data(symbol="BTC", granularity="1h")
         assert len(loaded_data) == 1
         assert loaded_data.iloc[0]["close"] == 50000.0  # Should be the second value
+
+    def test_historical_file_naming_and_directory(self):
+        """Test that files are created under historical dir with correct names."""
+        now = datetime.utcnow()
+        ohlcv_data = [
+            OHLCVData("BTC-USD", now, 45000.0, 45500.0, 44800.0, 45200.0, 1250000.0, source="coingecko")
+        ]
+        granularity = "1d"
+        assert self.storage.save_ohlcv_data(ohlcv_data, granularity=granularity)
+        year = now.year
+        hist_dir = os.path.join(self.config.data_dir, getattr(self.config, "historical_data_dir", "historical"))
+        expected_filename = f"BTC-USD_{year}_{granularity}.csv"
+        expected_path = os.path.join(hist_dir, expected_filename)
+        assert os.path.exists(expected_path)
+        # Verify CSV header columns order
+        df = pd.read_csv(expected_path)
+        assert list(df.columns)[:7] == ["symbol", "timestamp", "open", "high", "low", "close", "volume"]

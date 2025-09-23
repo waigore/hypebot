@@ -3,7 +3,7 @@
 import os
 import logging
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 import pandas as pd
 
 from .models import PriceData, MarketData, OHLCVData
@@ -21,6 +21,9 @@ class DataStorage:
         self.config = config
         self.data_dir = config.data_dir
         self._ensure_data_directory()
+        # Historical OHLCV directory
+        self.historical_dir = os.path.join(self.data_dir, getattr(self.config, "historical_data_dir", "historical"))
+        os.makedirs(self.historical_dir, exist_ok=True)
     
     def _ensure_data_directory(self):
         """Ensure data directory exists."""
@@ -312,66 +315,150 @@ class DataStorage:
             logger.error(f"Error getting latest price for {symbol}: {e}")
             return None
     
-    def save_ohlcv_data(self, ohlcv_data: List[OHLCVData], append: bool = True) -> bool:
-        """Save OHLCV data to CSV file."""
+    def _historical_filename(self, symbol: str, year: int, granularity: str) -> str:
+        symbol_upper = symbol.upper()
+        return f"{symbol_upper}_{year}_{granularity}.csv"
+
+    def _historical_filepath(self, symbol: str, year: int, granularity: str) -> str:
+        return os.path.join(self.historical_dir, self._historical_filename(symbol, year, granularity))
+
+    def _normalize_timestamp_series_utc(self, ts: pd.Series) -> pd.Series:
+        s = pd.to_datetime(ts, utc=True)
+        return s
+
+    def _write_ohlcv_df(self, df: pd.DataFrame, filepath: str, append: bool) -> None:
+        # Ensure column order per spec
+        columns = ["symbol", "timestamp", "open", "high", "low", "close", "volume", "source"]
+        # Drop unknown columns
+        df = df[[c for c in columns if c in df.columns]]
+        # Remove duplicates by symbol+timestamp (last write wins)
+        df = df.drop_duplicates(subset=["symbol", "timestamp"], keep="last")
+        # If appending, merge with existing
+        if append and os.path.exists(filepath):
+            existing = pd.read_csv(filepath)
+            if not existing.empty:
+                existing["timestamp"] = pd.to_datetime(existing["timestamp"], utc=True)
+            combined = pd.concat([existing, df], ignore_index=True)
+            combined = combined.drop_duplicates(subset=["symbol", "timestamp"], keep="last")
+            # Sort by timestamp
+            combined = combined.sort_values("timestamp")
+            # Write
+            combined.to_csv(filepath, index=False)
+        else:
+            df = df.sort_values("timestamp")
+            df.to_csv(filepath, index=False)
+
+    def save_ohlcv_data(self, ohlcv_data: List[OHLCVData], granularity: str, append: bool = True) -> bool:
+        """Save OHLCV data to organized CSV files by symbol/year/granularity."""
         try:
             if not ohlcv_data:
                 return True
-            
+
             # Convert to DataFrame
             df = pd.DataFrame([data.to_dict() for data in ohlcv_data])
-            
-            file_path = self._get_file_path("ohlcv_data.csv")
-            
-            if append and os.path.exists(file_path):
-                # Load existing data and append
-                existing_df = pd.read_csv(file_path)
-                existing_df['timestamp'] = pd.to_datetime(existing_df['timestamp'])
-                combined_df = pd.concat([existing_df, df], ignore_index=True)
-                # Remove duplicates based on symbol and timestamp
-                combined_df = combined_df.drop_duplicates(subset=['symbol', 'timestamp'], keep='last')
-                combined_df.to_csv(file_path, index=False)
-            else:
-                df.to_csv(file_path, index=False)
-            
-            logger.info(f"Saved {len(ohlcv_data)} OHLCV data records")
+            if df.empty:
+                return True
+            # Normalize timestamps to UTC
+            df["timestamp"] = self._normalize_timestamp_series_utc(df["timestamp"])
+
+            # Group by symbol and year, write to corresponding files
+            records_written = 0
+            for (symbol, year), group in df.groupby(["symbol", df["timestamp"].dt.year]):
+                filepath = self._historical_filepath(symbol, int(year), granularity)
+                self._write_ohlcv_df(group, filepath, append=append)
+                records_written += len(group)
+
+            logger.info(f"Saved {records_written} OHLCV data records to historical storage for granularity {granularity}")
             return True
             
         except Exception as e:
             logger.error(f"Error saving OHLCV data: {e}")
             return False
     
+    def _list_symbol_year_files(self, symbol: str, granularity: str, year: Optional[int] = None) -> List[str]:
+        symbol_upper = symbol.upper()
+        files: List[str] = []
+        if year is not None:
+            candidate = self._historical_filepath(symbol_upper, int(year), granularity)
+            if os.path.exists(candidate):
+                files.append(candidate)
+            return files
+        # scan directory for matching files
+        try:
+            for fname in os.listdir(self.historical_dir):
+                if not fname.endswith(".csv"):
+                    continue
+                # Expected: SYMBOL_YEAR_GRANULARITY.csv
+                parts = fname[:-4].split("_")
+                if len(parts) != 3:
+                    continue
+                f_symbol, f_year, f_gran = parts
+                if f_symbol == symbol_upper and f_gran == granularity:
+                    files.append(os.path.join(self.historical_dir, fname))
+        except FileNotFoundError:
+            pass
+        return sorted(files)
+
     def load_ohlcv_data(
-        self, 
-        symbol: Optional[str] = None, 
+        self,
+        symbol: Optional[str] = None,
+        granularity: Optional[str] = None,
+        year: Optional[int] = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None
     ) -> pd.DataFrame:
-        """Load OHLCV data from CSV file."""
+        """Load OHLCV data from organized CSV files.
+
+        If symbol and granularity are provided, loads corresponding files (optionally filtered by year).
+        If symbol is None, loads all symbols for the provided granularity.
+        """
         try:
-            file_path = self._get_file_path("ohlcv_data.csv")
-            
-            if not os.path.exists(file_path):
-                logger.warning(f"OHLCV data file not found: {file_path}")
+            frames: List[pd.DataFrame] = []
+            # Determine files to load
+            if symbol and granularity:
+                files = self._list_symbol_year_files(symbol, granularity, year)
+            else:
+                # load all files optionally filtered by granularity
+                files = []
+                try:
+                    for fname in os.listdir(self.historical_dir):
+                        if not fname.endswith('.csv'):
+                            continue
+                        if granularity:
+                            if not fname.endswith(f"_{granularity}.csv"):
+                                continue
+                        files.append(os.path.join(self.historical_dir, fname))
+                except FileNotFoundError:
+                    files = []
+
+            if not files:
+                logger.warning("No OHLCV historical files found for criteria")
                 return pd.DataFrame()
-            
-            df = pd.read_csv(file_path)
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
-            
+
+            for path in files:
+                tmp = pd.read_csv(path)
+                if tmp.empty:
+                    continue
+                tmp['timestamp'] = pd.to_datetime(tmp['timestamp'], utc=True)
+                frames.append(tmp)
+
+            if not frames:
+                return pd.DataFrame()
+
+            df = pd.concat(frames, ignore_index=True)
             # Filter by symbol if provided
             if symbol:
                 df = df[df['symbol'] == symbol.upper()]
-            
             # Filter by date range if provided
-            if start_date:
-                df = df[df['timestamp'] >= start_date]
-            if end_date:
-                df = df[df['timestamp'] <= end_date]
-            
+            if start_date is not None:
+                df = df[df['timestamp'] >= pd.to_datetime(start_date, utc=True)]
+            if end_date is not None:
+                df = df[df['timestamp'] <= pd.to_datetime(end_date, utc=True)]
+
             # Sort by timestamp
             df = df.sort_values('timestamp')
-            
-            logger.info(f"Loaded {len(df)} OHLCV data records")
+
+            logger.info(f"Loaded {len(df)} OHLCV data records from historical storage")
             return df
             
         except Exception as e:
@@ -381,13 +468,14 @@ class DataStorage:
     def get_historical_ohlcv_data(
         self, 
         symbol: str,
+        granularity: str,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None
     ) -> pd.DataFrame:
         """Get historical OHLCV data with standardized DataFrame shape and UTC timestamps."""
         try:
             # Load OHLCV data
-            df = self.load_ohlcv_data(symbol=symbol, start_date=start_date, end_date=end_date)
+            df = self.load_ohlcv_data(symbol=symbol, granularity=granularity, start_date=start_date, end_date=end_date)
             
             if df.empty:
                 logger.warning(f"No OHLCV data found for symbol {symbol}")
@@ -420,10 +508,11 @@ class DataStorage:
                 "data_type": "ohlcv",
                 "total_records": len(ohlcv_df),
                 "start_date": ohlcv_df.index.min() if not ohlcv_df.empty else None,
-                "end_date": ohlcv_df.index.max() if not ohlcv_df.empty else None
+                "end_date": ohlcv_df.index.max() if not ohlcv_df.empty else None,
+                "granularity": granularity
             }
             
-            logger.info(f"Retrieved {len(ohlcv_df)} historical OHLCV records for {symbol}")
+            logger.info(f"Retrieved {len(ohlcv_df)} historical OHLCV records for {symbol} at {granularity}")
             return ohlcv_df
             
         except Exception as e:
@@ -433,6 +522,7 @@ class DataStorage:
     def get_latest_ohlcv_data(self, symbol: str) -> Optional[OHLCVData]:
         """Get the latest OHLCV data for a symbol."""
         try:
+            # Load across all granularities and pick latest overall
             df = self.load_ohlcv_data(symbol=symbol)
             if df.empty:
                 return None
