@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import pandas as pd
 
@@ -11,7 +11,9 @@ from .base import Strategy
 from .models import StrategyOrder
 from ..indicators.rsi_calculator import RSICalculator
 from ..indicators.models import TradingSignal
+from ..indicators.base_indicator import BaseIndicator
 from ..position.kelly_criterion import KellyCriterion
+from ..position.manager import PositionManager
 from ..config import TradingConfig
 
 
@@ -20,13 +22,17 @@ class RSIStrategy(Strategy):
 
     def __init__(
         self, 
-        *args, 
+        assets: List[str],
+        interval: str,
+        position_manager: PositionManager,
         rsi_calculator: RSICalculator, 
         kelly_criterion: KellyCriterion,
         config: TradingConfig,
-        **kwargs
+        indicators: Optional[Dict[str, BaseIndicator]] = None,
     ) -> None:
-        super().__init__(*args, **kwargs)
+        super().__init__(assets, interval, position_manager, indicators)
+        if position_manager is None:
+            raise ValueError("RSIStrategy requires a position_manager. Cannot be None.")
         self.rsi = rsi_calculator
         self.kelly_criterion = kelly_criterion
         self.config = config
@@ -98,13 +104,21 @@ class RSIStrategy(Strategy):
             
         # Check if we already have a position for this symbol
         existing_position = self.position_manager.get_position(symbol)
-        if existing_position is not None:
-            # Only trade if signal is opposite to current position
-            if (signal.signal_type == "BUY" and existing_position.side == "LONG") or \
-               (signal.signal_type == "SELL" and existing_position.side == "SHORT"):
+        
+        if signal.signal_type == "BUY":
+            # For BUY signals, only allow if we don't have a LONG position already
+            if existing_position is not None and existing_position.side == "LONG":
                 return False
-                
-        return True
+            return True
+            
+        elif signal.signal_type == "SELL":
+            # For SELL signals, only allow if we have a LONG position to sell
+            # This prevents short selling
+            if existing_position is None or existing_position.side != "LONG":
+                return False
+            return True
+            
+        return False
     
     def _calculate_position_size(self, symbol: str, current_price: float, signal: TradingSignal, df: pd.DataFrame) -> float:
         """Calculate position size using Kelly criterion."""

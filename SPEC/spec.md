@@ -51,6 +51,10 @@ hypebot/
 
 ### Position Module (`position/`)
 - **manager.py**: Portfolio tracking and P&L calculation
+  - Maintains a dedicated cash position when initialized with starting cash
+  - Updates cash when asset positions are opened/closed (debits on buys, credits on sells)
+  - Prevents opening positions without sufficient cash; raises an error
+  - Prevents closing more than the held asset amount; raises an error
 - **kelly_criterion.py**: Kelly criterion for position sizing
 - **models.py**: Position and sizing models
 
@@ -64,7 +68,7 @@ hypebot/
 ### Backtesting Module (`backtesting/`)
 - **backtester.py**: Backtesting engine
 - **metrics.py**: Performance metrics calculation
-- **visualize.py**: Equity curve visualization
+- **visualize.py**: Equity curve visualization with control strategy comparison
 
 ## Configuration
 
@@ -151,13 +155,14 @@ The `StrategyRunner` orchestrates strategy execution:
 - Updates PositionManager with executed trades
 - Supports both backtest and live modes
 
-### RSI Strategy
+### Trading Strategies
 
-The default RSI strategy:
-- Calculates RSI values from historical data
-- Generates BUY/SELL signals based on thresholds
-- Uses KellyCriterion for position sizing
-- Applies risk management and signal filtering
+All implemented trading strategies are documented in [strategies.md](strategies.md).
+
+The default RSI strategy provides:
+- RSI-based signal generation with configurable thresholds
+- Kelly Criterion position sizing
+- Risk management and signal filtering
 
 ## Backtesting
 
@@ -170,6 +175,25 @@ The `BackTester` class provides:
 - Equity curve visualization
 - Buy-and-hold baseline comparison
 
+#### Equity Calculation
+- Equity at each tick is the sum of:
+  - Mark-to-market value of all open asset positions, and
+  - Current cash position balance
+- The backtester records this equity on every step to produce the equity curve.
+
+#### Validity of trading strategy orders
+- If the strategy being backtested issues orders that are incompatible with their overall portfolio positions (e.g. opening asset positions without sufficient cash, closing asset positions without sufficient asset sizes), such actions are marked as errors and the backtesting stopped immediately
+- The errors are accessible as part of the backtesting result
+
+### Control Strategy Integration
+
+The backtesting system automatically includes a Buy-and-Hold control strategy:
+
+- **Automatic Creation**: The `BackTester` creates and runs a Buy-and-Hold strategy instance alongside any specified strategies
+- **Equal Treatment**: The control strategy uses the same starting cash, commission model, and data as other strategies
+- **Performance Baseline**: Provides a simple market performance benchmark for comparison
+- **Multi-Asset Support**: When multiple assets are specified, the control strategy distributes cash equally across all assets
+
 ### Performance Metrics
 
 - Total return (absolute and percentage)
@@ -178,6 +202,28 @@ The `BackTester` class provides:
 - Maximum drawdown and duration
 - Win rate and trade statistics
 - Kelly criterion analysis
+
+### HTML Report Generation
+
+The backtesting system generates comprehensive HTML reports that include:
+
+- **Side-by-Side Comparison**: All strategies (including Buy-and-Hold control) displayed in comparison tables
+- **Performance Metrics Table**: Key metrics for each strategy in tabular format for easy comparison
+- **Strategy Rankings**: Performance rankings across different metrics (return, Sharpe ratio, etc.)
+- **Trade Analysis**: Detailed trade statistics and win/loss analysis per strategy
+- **Configuration Summary**: Complete backtest configuration and parameters used
+- **Interactive Elements**: Sortable tables and expandable sections for detailed analysis
+
+### Equity Curve Visualization
+
+The backtesting system generates comprehensive equity curve plots that include:
+
+- **Multi-Strategy Lines**: All backtested strategies displayed as separate lines on the same plot
+- **Buy-and-Hold Baseline**: Control strategy line always included for performance comparison
+- **Color-Coded Legend**: Distinct colors and styles for each strategy with clear labeling
+- **Interactive Features**: Hover tooltips showing exact values and dates
+- **Performance Annotations**: Key performance milestones and drawdown periods highlighted
+- **Export Formats**: High-resolution PNG and SVG formats for reports and presentations
 
 ## Utility Programs
 

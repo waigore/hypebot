@@ -50,9 +50,12 @@ class StrategyRunner:
         self.mode = mode
         self.config = execution_config or ExecutionConfig()
         self.profile: Dict[str, float] = {"slice_s": 0.0, "tick_s": 0.0, "execute_s": 0.0}
+        # Accumulate executed orders so callers can recover partial progress on errors
+        self._orders: List[Order] = []
 
     async def run(self, ticks: Iterable[datetime]) -> List[Order]:
-        orders: List[Order] = []
+        # Reset accumulated orders each run
+        self._orders = []
         await self.strategy.on_start()
         try:
             sorted_ticks = sorted(ticks)
@@ -71,10 +74,10 @@ class StrategyRunner:
                 t2 = time.perf_counter()
                 placed = await self._execute(strategy_orders)
                 self.profile["execute_s"] += time.perf_counter() - t2
-                orders.extend(placed)
+                self._orders.extend(placed)
         finally:
             await self.strategy.on_stop()
-        return orders
+        return self._orders
 
     def _slice_historical(self, as_of: datetime) -> Dict[str, pd.DataFrame]:
         result: Dict[str, pd.DataFrame] = {}
@@ -95,6 +98,9 @@ class StrategyRunner:
     async def _execute(self, strategy_orders: List[StrategyOrder]) -> List[Order]:
         executed: List[Order] = []
         for strategy_order in strategy_orders:
+            # Set the current backtest timestamp on the trading client
+            if hasattr(self.trading_client, 'set_timestamp'):
+                self.trading_client.set_timestamp(strategy_order.timestamp)
             order = await self.trading_client.place_order(
                 symbol=strategy_order.symbol,
                 side=strategy_order.side,
@@ -122,20 +128,52 @@ class StrategyRunner:
                 if strategy_order.side == "BUY":
                     if existing is None:
                         if callable(open_position):
-                            open_position(
+                            ok = open_position(
                                 symbol=strategy_order.symbol,
                                 side="LONG",
                                 size=float(strategy_order.quantity),
                                 entry_price=price,
                                 kelly_size=float(strategy_order.quantity),
                             )
+                            if ok is False:
+                                raise RuntimeError(f"Illegal order: insufficient cash to open LONG {strategy_order.symbol}")
                     elif getattr(existing, "side", None) == "SHORT":
                         if callable(close_position):
                             close_position(strategy_order.symbol, exit_price=price)
                 elif strategy_order.side == "SELL":
                     if existing is not None and getattr(existing, "side", None) == "LONG":
+                        # Validate available size against sell quantity
+                        try:
+                            sell_qty = float(strategy_order.quantity)
+                        except Exception:
+                            sell_qty = None  # treat as None -> full close
+                        if sell_qty is not None:
+                            if sell_qty > float(getattr(existing, "size", 0.0)) + 1e-12:
+                                raise RuntimeError(
+                                    f"Illegal order: SELL qty {sell_qty} exceeds LONG size {getattr(existing, 'size', 0.0)} for {strategy_order.symbol}"
+                                )
                         if callable(close_position):
-                            close_position(strategy_order.symbol, exit_price=price)
+                            # Support partial close when quantity is provided; tolerate PMs without quantity param
+                            try:
+                                import inspect  # local import to avoid top-level dependency in hot path
+                                sig = inspect.signature(close_position)  # type: ignore[arg-type]
+                                supports_qty = "quantity" in sig.parameters
+                            except Exception:
+                                supports_qty = False
+                            if sell_qty is not None and supports_qty:
+                                close_position(strategy_order.symbol, exit_price=price, quantity=sell_qty)
+                            else:
+                                # If PM doesn't support partials and sell is partial, raise
+                                if sell_qty is not None and not supports_qty and sell_qty < float(getattr(existing, "size", 0.0)) - 1e-12:
+                                    raise RuntimeError(
+                                        f"Illegal order: partial SELL not supported by PositionManager for {strategy_order.symbol}"
+                                    )
+                                close_position(strategy_order.symbol, exit_price=price)
+                    else:
+                        # Illegal: attempting to sell without a LONG position
+                        raise RuntimeError(f"Illegal order: SELL without LONG for {strategy_order.symbol}")
+        if executed:
+            logger.debug("\n".join([f"{e.symbol} {e.side} {e.quantity} {e.price}" for e in executed]))
         return executed
 
 

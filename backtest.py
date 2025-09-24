@@ -13,6 +13,7 @@ import sys
 import time
 from datetime import datetime
 from typing import Dict, Optional, Tuple
+import logging
 
 try:
     import yaml  # type: ignore
@@ -27,6 +28,7 @@ from hypebot.backtesting.metrics import compute_metrics
 from hypebot.backtesting.visualize import plot_equity_curves
 from hypebot.indicators.rsi_calculator import RSICalculator
 from hypebot.strategy.rsi_strategy import RSIStrategy
+from hypebot.strategy.buy_and_hold_strategy import BuyAndHoldStrategy
 from hypebot.data.storage import DataStorage
 from hypebot.position.manager import PositionManager
 from hypebot.position.kelly_criterion import KellyCriterion
@@ -83,26 +85,20 @@ def _resolve_args_with_config(args: argparse.Namespace, cfg: Dict) -> Tuple[Dict
         "show_plot": not args.no_plot,
         "debug": args.debug,
     }
-
     if cfg:
-        bt = (cfg.get("backtest") or {}) if isinstance(cfg.get("backtest"), dict) else {}
+        bt = cfg.get("backtest") or {}
+        # Only fill from config when CLI did not provide a value (CLI precedence)
         for key in ("interval", "start_date", "end_date", "starting_cash", "output_dir", "debug"):
-            if bt.get(key) is not None and getattr(args, key, None) is None:
+            if backtest_cfg.get(key) is None and bt.get(key) is not None:
                 backtest_cfg[key] = bt.get(key)
         # show_plot defaults to True in config unless explicitly false
         if bt.get("show_plot") is not None and args.no_plot is False:
             backtest_cfg["show_plot"] = bool(bt.get("show_plot"))
         # assets and strategy required
-        if not args.assets:
-            backtest_cfg["assets"] = bt.get("assets")
-        else:
-            backtest_cfg["assets"] = args.assets
-        if not args.strategy:
-            backtest_cfg["strategy"] = bt.get("strategy")
-        else:
-            backtest_cfg["strategy"] = args.strategy
+        backtest_cfg["assets"] = bt.get("assets")
+        backtest_cfg["strategy"] = bt.get("strategy")
         # commission
-        if args.commission is None and isinstance(bt.get("commission"), dict):
+        if isinstance(bt.get("commission"), dict):
             cdict = bt.get("commission")
             backtest_cfg["commission"] = f"{cdict.get('type')}:{cdict.get('value')}"
     else:
@@ -113,7 +109,7 @@ def _resolve_args_with_config(args: argparse.Namespace, cfg: Dict) -> Tuple[Dict
     return backtest_cfg, strategy_params
 
 
-def _build_strategy(name: str, config: Config, params: Dict, assets: list[str], interval: str) -> RSIStrategy:
+def _build_strategy(name: str, config: Config, params: Dict, assets: list[str], interval: str):
     key = (name or "").strip().lower()
     if key in ("rsi", "rsi_strategy"):
         period = int(params.get("period", config.trading.rsi_period))
@@ -125,31 +121,39 @@ def _build_strategy(name: str, config: Config, params: Dict, assets: list[str], 
             overbought_threshold=overbought,
         )
         storage = DataStorage(config.database)
-        pm = PositionManager(config.trading, storage)
+        # Create position manager for strategy initialization
+        pm = PositionManager(config.trading, storage, load_existing=False)
         kelly_criterion = KellyCriterion(config.trading)
         return RSIStrategy(
             assets=assets, 
             interval=interval, 
-            position_manager=pm, 
+            position_manager=pm,
             rsi_calculator=rsi_calc,
             kelly_criterion=kelly_criterion,
             config=config.trading
         )
+    elif key in ("buy_and_hold", "buyandhold", "buy-and-hold"):
+        storage = DataStorage(config.database)
+        pm = PositionManager(config.trading, storage, load_existing=False)
+        return BuyAndHoldStrategy(
+            assets=assets,
+            interval=interval,
+            position_manager=pm
+        )
     raise ValueError(f"Unsupported strategy: {name}")
 
 
-def _print_metrics(name: str, metrics: Dict[str, float]) -> None:
+def _print_metrics(name: str, _metrics: Dict[str, float]) -> None:
     def pct(x: float) -> str:
         return f"{x*100:.2f}%"
-
     print(f"\nResults - {name}")
     print("====================")
-    print(f"Total Return:   {pct(metrics.get('return_pct', 0.0))}")
-    print(f"CAGR:           {pct(metrics.get('cagr', 0.0))}")
-    print(f"Vol (annual):   {pct(metrics.get('vol_annual', 0.0))}")
-    print(f"Sharpe:         {metrics.get('sharpe', 0.0):.2f}")
-    print(f"Sortino:        {metrics.get('sortino', 0.0):.2f}")
-    print(f"Max Drawdown:   {pct(metrics.get('max_drawdown', 0.0))}")
+    print(f"Total Return:   {pct(_metrics.get('return_pct', 0.0))}")
+    print(f"CAGR:           {pct(_metrics.get('cagr', 0.0))}")
+    print(f"Vol (annual):   {pct(_metrics.get('vol_annual', 0.0))}")
+    print(f"Sharpe:         {_metrics.get('sharpe', 0.0):.2f}")
+    print(f"Sortino:        {_metrics.get('sortino', 0.0):.2f}")
+    print(f"Max Drawdown:   {pct(_metrics.get('max_drawdown', 0.0))}")
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -164,7 +168,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--config", "-c", type=str, default=None, help="YAML config file")
     parser.add_argument("--no-plot", action="store_true", help="Suppress equity curve plot")
     parser.add_argument("--debug", action="store_true", help="Show profiling information")
-    parser.add_argument("--output-dir", "-o", type=str, default="./backtest_results")
+    # Let YAML override when CLI flag not provided; default applied later
+    parser.add_argument("--output-dir", "-o", type=str, default=None)
 
     args = parser.parse_args(argv)
 
@@ -177,46 +182,61 @@ def main(argv: Optional[list[str]] = None) -> int:
         print("Error: --assets and --strategy are required (or provide them via --config).", file=sys.stderr)
         return 2
 
-    assets = [s.strip() for s in (merged["assets"] if isinstance(merged["assets"], str) else merged["assets"]) if s and s.strip()]
+    if isinstance(merged["assets"], str):
+        assets = [s.strip() for s in merged["assets"].split(",") if s and s.strip()]
+    else:
+        assets = [s.strip() for s in merged["assets"] if s and s.strip()]
     strategy_name = str(merged["strategy"]).strip()
     interval = str(merged["interval"]).strip()
     start = _parse_datetime(merged.get("start_date"))
     end = _parse_datetime(merged.get("end_date"))
     starting_cash = float(merged.get("starting_cash", 10000.0))
     commission = _parse_commission(merged.get("commission"))
-    output_dir = str(merged.get("output_dir", "./backtest_results"))
+    # Use CLI > YAML > fallback default
+    output_dir = str(merged.get("output_dir") or "./backtest_results")
     show_plot = bool(merged.get("show_plot", True))
     debug = bool(merged.get("debug", False))
 
     os.makedirs(output_dir, exist_ok=True)
 
+    if debug:
+        logging.basicConfig(level=logging.DEBUG)
+
     # Build runtime config (do not call validate here; backtests don't require live API keys)
     config = Config.from_env()
 
     # Construct strategy
-    strat_params = strat_params_all.get(strategy_name, {}) if isinstance(strat_params_all, dict) else {}
+    strat_params = strat_params_all.get(strategy_name, {})
     strategy = _build_strategy(strategy_name, config, strat_params, assets=assets, interval=interval)
 
-    # Run the backtest
+    # Run the backtest with control strategy
     bt = BackTester(config=config, commission=commission, starting_cash=starting_cash)
 
     t0 = time.perf_counter()
-    result = None
+    results = None
     try:
-        result = pd.Series(dtype=float)  # type: ignore
-        # BackTester.run_single is async; run it
+        # BackTester.run_with_control is async; run it
         import asyncio
 
         async def _run():
-            return await bt.run_single(strategy=strategy, assets=assets, interval=interval, start=start, end=end)
+            return await bt.run_with_control(
+                strategies=[strategy], 
+                assets=assets, 
+                interval=interval, 
+                start=start, 
+                end=end
+            )
 
-        result = asyncio.run(_run())
+        results = asyncio.run(_run())
     finally:
         elapsed_s = time.perf_counter() - t0
 
-    equity_curve = result.equity_curve if result else pd.Series(dtype=float)
+    # Get the main strategy result
+    strategy_name = strategy.__class__.__name__
+    result = results.get(strategy_name)
+    equity_curve = result.equity_curve
 
-    # Compute and print metrics
+    # Compute and print metrics for main strategy
     periods_per_year = {
         "1h": 24 * 365,
         "4h": 6 * 365,
@@ -229,7 +249,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     print(f"Elapsed: {elapsed_s:.2f}s | Points: {len(equity_curve)}")
 
-    # Save outputs
+    # Save outputs for main strategy
     # 1) Equity curve CSV
     ecsv_path = os.path.join(output_dir, f"equity_{strategy_name.replace(' ', '_')}.csv")
     equity_curve.to_csv(ecsv_path, header=["equity"])  # index are timestamps
@@ -242,40 +262,30 @@ def main(argv: Optional[list[str]] = None) -> int:
     # 3) Trades/Orders CSV (capture executed orders as trade-like log)
     trades_csv_path = os.path.join(output_dir, f"trades_{strategy_name.replace(' ', '_')}.csv")
     try:
-        if hasattr(result, "orders") and isinstance(result.orders, list) and len(result.orders) > 0:  # type: ignore
-            rows = []
+        rows = []
+        if hasattr(result, "orders") and isinstance(result.orders, list):  # type: ignore
             for o in result.orders:  # type: ignore
-                try:
-                    rows.append({
-                        "timestamp": getattr(o, "timestamp", None),
-                        "symbol": getattr(o, "symbol", None),
-                        "side": getattr(o, "side", None),
-                        "order_type": getattr(o, "order_type", None),
-                        "quantity": getattr(o, "quantity", None),
-                        "price": getattr(o, "price", None),
-                        "filled_quantity": getattr(o, "filled_quantity", None),
-                        "average_fill_price": getattr(o, "average_fill_price", None),
-                        "status": getattr(o, "status", None),
-                        "order_id": getattr(o, "order_id", None),
-                    })
-                except Exception:
-                    continue
-            if rows:
-                df_trades = pd.DataFrame(rows)
-                # Serialize datetime if present
-                if "timestamp" in df_trades.columns:
-                    df_trades["timestamp"] = pd.to_datetime(df_trades["timestamp"])  # will handle None
-                df_trades.to_csv(trades_csv_path, index=False)
-                print(f"Saved trades CSV: {trades_csv_path}")
+                rows.append({
+                    "timestamp": getattr(o, "timestamp", None),
+                    "symbol": getattr(o, "symbol", None),
+                    "side": getattr(o, "side", None),
+                    "order_type": getattr(o, "order_type", None),
+                    "quantity": getattr(o, "quantity", None),
+                    "price": getattr(o, "price", None),
+                    "filled_quantity": getattr(o, "filled_quantity", None),
+                    "average_fill_price": getattr(o, "average_fill_price", None),
+                    "status": getattr(o, "status", None),
+                    "order_id": getattr(o, "order_id", None),
+                })
+        df_trades = pd.DataFrame(rows)
+        if "timestamp" in df_trades.columns:
+            df_trades["timestamp"] = pd.to_datetime(df_trades["timestamp"])  # will handle None
+        df_trades.to_csv(trades_csv_path, index=False)
+        print(f"Saved trades CSV: {trades_csv_path}")
     except Exception as e:
         print(f"Warning: failed to write trades CSV: {e}")
 
-    # 4) Plot (optional)
-    plot_path = None
-    if show_plot and not equity_curve.empty:
-        plot_path = os.path.join(output_dir, f"equity_{strategy_name.replace(' ', '_')}.png")
-        plot_equity_curves({strategy_name: equity_curve}, title=f"Equity Curve - {strategy_name}", filepath=plot_path)
-        print(f"Saved plot: {plot_path}")
+    # Plot will be generated in the buy-and-hold section if available
 
     # 5) Debug info
     if debug and isinstance(result.snapshots.attrs.get("profile"), dict):  # type: ignore
@@ -289,6 +299,63 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     print(f"Saved equity CSV: {ecsv_path}")
     print(f"Saved metrics JSON: {mjson_path}")
+
+    # Process buy-and-hold control strategy if provided
+    control_result = results.get("BuyAndHoldStrategy")
+    control_equity_curve = None
+    if control_result is not None:
+        control_equity_curve = control_result.equity_curve
+        # Compute metrics for buy-and-hold
+        control_metrics = compute_metrics(control_equity_curve, risk_free_rate=config.trading.risk_free_rate, periods_per_year=periods_per_year)
+        _print_metrics("BuyAndHoldStrategy", control_metrics)
+        # Save buy-and-hold outputs
+        # 1) Equity curve CSV
+        control_ecsv_path = os.path.join(output_dir, "equity_buy_and_hold.csv")
+        control_equity_curve.to_csv(control_ecsv_path, header=["equity"])
+        # 2) Metrics JSON
+        control_mjson_path = os.path.join(output_dir, "metrics_buy_and_hold.json")
+        with open(control_mjson_path, "w", encoding="utf-8") as f:
+            json.dump(control_metrics, f, indent=2)
+        # 3) Trades CSV for buy-and-hold
+        control_trades_csv_path = os.path.join(output_dir, "trades_buy_and_hold.csv")
+        try:
+            if hasattr(control_result, "orders") and isinstance(control_result.orders, list) and len(control_result.orders) > 0:
+                rows = []
+                for o in control_result.orders:
+                    try:
+                        rows.append({
+                            "timestamp": getattr(o, "timestamp", None),
+                            "symbol": getattr(o, "symbol", None),
+                            "side": getattr(o, "side", None),
+                            "order_type": getattr(o, "order_type", None),
+                            "quantity": getattr(o, "quantity", None),
+                            "price": getattr(o, "price", None),
+                            "filled_quantity": getattr(o, "filled_quantity", None),
+                            "average_fill_price": getattr(o, "average_fill_price", None),
+                            "status": getattr(o, "status", None),
+                            "order_id": getattr(o, "order_id", None),
+                        })
+                    except Exception:
+                        continue
+                if rows:
+                    df_trades = pd.DataFrame(rows)
+                    if "timestamp" in df_trades.columns:
+                        df_trades["timestamp"] = pd.to_datetime(df_trades["timestamp"])
+                    df_trades.to_csv(control_trades_csv_path, index=False)
+                    print(f"Saved buy-and-hold trades CSV: {control_trades_csv_path}")
+        except Exception as e:
+            print(f"Warning: failed to write buy-and-hold trades CSV: {e}")
+        print(f"Saved buy-and-hold equity CSV: {control_ecsv_path}")
+        print(f"Saved buy-and-hold metrics JSON: {control_mjson_path}")
+    
+    # Update the plot (include control if available)
+    if show_plot and not equity_curve.empty:
+        plot_path = os.path.join(output_dir, f"equity_{strategy_name.replace(' ', '_')}.png")
+        combined_curves = {strategy_name: equity_curve}
+        if control_equity_curve is not None:
+            combined_curves["BuyAndHoldStrategy"] = control_equity_curve
+        plot_equity_curves(combined_curves, title=f"Equity Curves - {strategy_name} vs Buy & Hold", filepath=plot_path)
+        print(f"Saved combined plot: {plot_path}")
 
     return 0
 

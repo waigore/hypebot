@@ -14,6 +14,7 @@ from ..config import Config, TradingConfig, DatabaseConfig
 from ..data.storage import DataStorage
 from ..position.manager import PositionManager
 from ..strategy.base import Strategy
+from ..strategy.buy_and_hold_strategy import BuyAndHoldStrategy
 from ..strategy.runner import StrategyRunner, RunnerMode, ExecutionConfig
 from ..strategy.client import TradingClientInterface
 from ..exchange.models import Order
@@ -31,6 +32,7 @@ class BacktestResult:
     orders: List[Order]
     trades: List[Dict[str, float]]
     snapshots: pd.DataFrame
+    errors: List[str]
 
 
 class DummyTradingClient(TradingClientInterface):
@@ -39,6 +41,11 @@ class DummyTradingClient(TradingClientInterface):
     def __init__(self, commission: CommissionModel):
         self._orders: List[Order] = []
         self._commission = commission
+        self._current_timestamp: Optional[datetime] = None
+
+    def set_timestamp(self, timestamp: datetime) -> None:
+        """Set the current backtest timestamp for order generation."""
+        self._current_timestamp = timestamp
 
     async def place_order(self, symbol: str, side: str, order_type: str, quantity: float, price: Optional[float] = None) -> Order:
         executed_price = float(price) if price is not None else None
@@ -51,7 +58,7 @@ class DummyTradingClient(TradingClientInterface):
             status="FILLED",
             filled_quantity=quantity,
             average_fill_price=executed_price,
-            timestamp=datetime.utcnow(),
+            timestamp=self._current_timestamp or datetime.utcnow(),
         )
         self._orders.append(order)
         return order
@@ -95,12 +102,20 @@ class BackTester:
         execution_config: Optional[ExecutionConfig] = None,
     ) -> BacktestResult:
         # Build dedicated position manager and client per strategy
-        pm = PositionManager(self.config.trading, self.storage)
+        # For backtesting, don't load existing positions - keep everything in memory
+        pm = PositionManager(
+            self.config.trading,
+            self.storage,
+            load_existing=False,
+            starting_cash=self.starting_cash,
+            persist=False,
+        )
         client = DummyTradingClient(self.commission)
 
         # Strategy should already be created with pm; ensure assets/interval
         strategy.assets = assets
         strategy.interval = interval
+        # Use the same position manager instance for consistency
         strategy.position_manager = pm
 
         # Preload historical OHLCV per asset once
@@ -125,7 +140,13 @@ class BackTester:
         frames = [preloaded[a] for a in assets]
         frames = [f for f in frames if isinstance(f, pd.DataFrame) and not f.empty]
         if not frames:
-            return BacktestResult(equity_curve=pd.Series(dtype=float), orders=[], trades=[], snapshots=pd.DataFrame())
+            return BacktestResult(
+                equity_curve=pd.Series(dtype=float),
+                orders=[],
+                trades=[],
+                snapshots=pd.DataFrame(),
+                errors=[],
+            )
         all_index = frames[0].index
         for f in frames[1:]:
             all_index = all_index.union(f.index)
@@ -136,14 +157,25 @@ class BackTester:
         equity_points: List[Tuple[datetime, float]] = []
         snapshots: List[Dict[str, float]] = []
 
-        orders = await runner.run(ticks)
+        errors: List[str] = []
+        try:
+            orders = await runner.run(ticks)
+        except RuntimeError as e:
+            # Illegal order encountered; stop immediately and report error
+            # Preserve any orders placed before the error
+            try:
+                orders = list(getattr(runner, "_orders", []))
+            except Exception:
+                orders = []
+            errors.append(str(e))
+            # Build minimal snapshots/equity until the failure point if possible (left empty for simplicity)
         # expose simple profiling info on the result via snapshots attrs
         profile_info = getattr(runner, "profile", {})
 
-        # Build equity curve by marking to last close per asset and summing; PositionManager holds positions but we keep it simple
-        cash = self.starting_cash
+        # Build equity curve by marking to last close per asset and summing cash plus market value
+        # Calculate total portfolio value at each tick
         for t in ticks:
-            total_value = cash
+            total_value = pm.cash_balance
             for a in assets:
                 df = preloaded.get(a)
                 if df is not None and not df.empty:
@@ -154,7 +186,13 @@ class BackTester:
                         pos = pm.get_position(a)
                         if pos is not None:
                             pm.update_position_price(a, price)
-                            total_value += pos.unrealized_pnl + pos.entry_value
+                            # Add market value of position (size * current_price)
+                            total_value += pos.size * price
+            
+            # If no positions, use starting cash
+            if total_value == 0:
+                total_value = self.starting_cash
+                
             equity_points.append((t, total_value))
             snapshots.append({"timestamp": t, "equity": total_value})
 
@@ -163,6 +201,68 @@ class BackTester:
         )
         snapshots_df = pd.DataFrame(snapshots).set_index(pd.to_datetime(pd.Series([s["timestamp"] for s in snapshots]), utc=True))
         snapshots_df.attrs["profile"] = profile_info
-        return BacktestResult(equity_curve=equity_curve, orders=orders, trades=[], snapshots=snapshots_df)
+        return BacktestResult(equity_curve=equity_curve, orders=orders, trades=[], snapshots=snapshots_df, errors=errors)
+
+    async def run_with_control(
+        self,
+        strategies: List[Strategy],
+        assets: List[str],
+        interval: str,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        execution_config: Optional[ExecutionConfig] = None,
+    ) -> Dict[str, BacktestResult]:
+        """Run multiple strategies including a Buy-and-Hold control strategy.
+        
+        Args:
+            strategies: List of strategies to test
+            assets: List of asset symbols to trade
+            interval: Data granularity
+            start: Start date for backtest
+            end: End date for backtest
+            execution_config: Execution configuration
+            
+        Returns:
+            Dictionary mapping strategy names to BacktestResult objects
+        """
+        results = {}
+        
+        # Run each provided strategy
+        for strategy in strategies:
+            strategy_name = strategy.__class__.__name__
+            result = await self.run_single(
+                strategy=strategy,
+                assets=assets,
+                interval=interval,
+                start=start,
+                end=end,
+                execution_config=execution_config
+            )
+            results[strategy_name] = result
+        
+        # Always include Buy-and-Hold control strategy
+        control_strategy = BuyAndHoldStrategy(
+            assets=assets,
+            interval=interval,
+            position_manager=PositionManager(
+                self.config.trading,
+                self.storage,
+                load_existing=False,
+                starting_cash=self.starting_cash,
+                persist=False,
+            ),
+            starting_cash=self.starting_cash
+        )
+        control_result = await self.run_single(
+            strategy=control_strategy,
+            assets=assets,
+            interval=interval,
+            start=start,
+            end=end,
+            execution_config=execution_config
+        )
+        results["BuyAndHoldStrategy"] = control_result
+        
+        return results
 
 

@@ -98,6 +98,7 @@ python backtest.py [OPTIONS] [--config CONFIG_FILE]
 - **--assets, -a** (required): Comma-separated list of trading symbols (e.g., "BTC-USD,ETH-USD")
 - **--strategy, -s** (required): Strategy name to use for backtesting
   - Valid values: "rsi", "buy_and_hold" (extensible for future strategies)
+  - Note: Buy-and-hold control strategy is automatically included in all backtests
 - **--interval, -i** (optional): Data granularity/interval (default: "1d")
   - Valid values: "1h", "4h", "1d", "1w", "1mo"
 - **--start-date, --start** (optional): Start date for backtest (default: earliest available data)
@@ -139,7 +140,7 @@ strategy_params:
     oversold: 30
     overbought: 70
   buy_and_hold:
-    rebalance_frequency: "monthly"
+    # No parameters required - uses equal distribution across assets
 ```
 
 ### Usage Examples
@@ -168,7 +169,7 @@ python backtest.py --assets "BTC-USD,ETH-USD" --strategy rsi --commission "fixed
 - **Backtesting Engine**: Leverages `BackTester` class for historical data processing
 - **Data Loading**: Uses `DataStorage` for historical OHLCV data retrieval
 - **Configuration Management**: Supports both command-line arguments and YAML config files
-- **Error Handling**: Comprehensive validation of parameters and data availability
+- **Error Handling**: Comprehensive validation of parameters and data availability. Errors in the backtested strategy are reported in the console
 - **Progress Indication**: Shows progress for long-running backtests
 - **Result Generation**: Produces detailed performance reports and visualizations
 
@@ -213,6 +214,10 @@ When the `--debug` flag is used, the utility provides:
 - **Strategy Module**: Integrates with `Strategy` interface and concrete implementations
 - **Data Module**: Leverages `DataStorage` for historical data access
 - **Position Module**: Uses `PositionManager` for portfolio tracking
+  - Maintains a dedicated cash position when starting cash is provided
+  - Debits cash on buys and credits cash on sells
+  - Prevents opening positions without sufficient cash; raises an error
+  - Prevents closing more than held asset quantity; raises an error
 - **Configuration**: Extends existing `Config` classes for backtest-specific settings
 - **Visualization**: Utilizes `matplotlib` for equity curve generation
 - **Logging**: Integrates with existing logging infrastructure for debug output

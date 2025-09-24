@@ -14,8 +14,8 @@ def _safe_annualize(period_returns: pd.Series, periods_per_year: int) -> float:
 
 
 def compute_metrics(equity_curve: pd.Series, risk_free_rate: float = 0.0, periods_per_year: int = 252) -> Dict[str, float]:
-    if equity_curve is None or equity_curve.empty:
-        return {"pnl": 0.0, "return_pct": 0.0, "cagr": 0.0, "vol_annual": 0.0, "sharpe": 0.0, "sortino": 0.0, "max_drawdown": 0.0}
+    if equity_curve is None:
+        raise ValueError("Equity curve is required")
 
     equity = equity_curve.dropna().astype(float)
     returns = equity.pct_change().dropna()
