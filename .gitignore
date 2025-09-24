@@ -206,5 +206,6 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Hypebot data directories
+# Hypebot data and backtest directories
 data/
+backtest_results/

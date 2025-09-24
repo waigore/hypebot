@@ -42,7 +42,7 @@ class KellyCriterion:
             # Check if expected return is negative or zero
             expected_return = mean_return - self.risk_free_rate / 252
             if expected_return <= 0:
-                logger.warning("Expected return is negative or zero, Kelly fraction should be 0")
+                logger.debug("Expected return is negative or zero, Kelly fraction should be 0")
                 return 0.0
             
             if variance < 1e-10:  # Very small variance (effectively zero)

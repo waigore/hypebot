@@ -90,6 +90,28 @@ class RSICalculator(BaseIndicator):
         except Exception as e:
             logger.error(f"Error calculating RSI: {e}")
             return []
+
+    def calculate_last(self, data: pd.DataFrame) -> Optional[tuple[float, Optional[float]]]:
+        """Efficiently compute only the latest RSI value and previous value.
+
+        Returns (current_rsi, previous_rsi_or_None) or None if insufficient data.
+        """
+        try:
+            self.validate_data(data, ['price'])
+            if len(data) < self.period + 1:
+                return None
+            prices = data['price']
+            rsi_series = self._calculate_rsi(prices)
+            # Get last two non-Na values
+            valid = rsi_series.dropna()
+            if valid.empty:
+                return None
+            current = float(valid.iloc[-1])
+            previous = float(valid.iloc[-2]) if len(valid) > 1 else None
+            return current, previous
+        except Exception as e:
+            logger.error(f"Error calculating last RSI: {e}")
+            return None
     
     def _calculate_rsi(self, prices: pd.Series) -> pd.Series:
         """Calculate RSI using the standard formula."""

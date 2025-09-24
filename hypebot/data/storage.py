@@ -5,6 +5,8 @@ import logging
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
 import pandas as pd
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
 
 from .models import PriceData, MarketData, OHLCVData
 from ..config import DatabaseConfig
@@ -198,7 +200,20 @@ class DataStorage:
                 logger.warning(f"Positions file not found: {file_path}")
                 return pd.DataFrame()
             
+            # Check if file is empty or only contains whitespace
+            with open(file_path, 'r') as f:
+                content = f.read().strip()
+                if not content:
+                    logger.info("Positions file is empty")
+                    return pd.DataFrame()
+            
             df = pd.read_csv(file_path)
+            
+            # Check if DataFrame is empty after reading
+            if df.empty:
+                logger.info("No position records found in file")
+                return pd.DataFrame()
+            
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             
             logger.info(f"Loaded {len(df)} position records")
@@ -474,8 +489,17 @@ class DataStorage:
     ) -> pd.DataFrame:
         """Get historical OHLCV data with standardized DataFrame shape and UTC timestamps."""
         try:
+            # Determine year(s) to load based on date range
+            year = None
+            if start_date and end_date:
+                start_year = start_date.year
+                end_year = end_date.year
+                # If date range spans multiple years, we'll load all years and filter later
+                if start_year == end_year:
+                    year = start_year
+            
             # Load OHLCV data
-            df = self.load_ohlcv_data(symbol=symbol, granularity=granularity, start_date=start_date, end_date=end_date)
+            df = self.load_ohlcv_data(symbol=symbol, granularity=granularity, year=year, start_date=start_date, end_date=end_date)
             
             if df.empty:
                 logger.warning(f"No OHLCV data found for symbol {symbol}")

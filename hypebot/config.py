@@ -107,9 +107,9 @@ class TradingConfig:
             rsi_oversold=float(os.getenv("RSI_OVERSOLD", "30")),
             rsi_overbought=float(os.getenv("RSI_OVERBOUGHT", "70")),
             kelly_lookback_period=int(os.getenv("KELLY_LOOKBACK_PERIOD", "30")),
-            max_position_size=float(os.getenv("MAX_POSITION_SIZE", "0.1")),
-            min_position_size=float(os.getenv("MIN_POSITION_SIZE", "0.001")),
-            risk_free_rate=float(os.getenv("RISK_FREE_RATE", "0.02"))
+            max_position_size=float(os.getenv("MAX_POSITION_SIZE", "1")),
+            min_position_size=float(os.getenv("MIN_POSITION_SIZE", "0.1")),
+            risk_free_rate=float(os.getenv("RISK_FREE_RATE", "0.04"))
         )
 
 
