@@ -27,7 +27,9 @@ from hypebot.backtesting.backtester import BackTester, CommissionModel
 from hypebot.backtesting.metrics import compute_metrics
 from hypebot.backtesting.visualize import plot_equity_curves
 from hypebot.indicators.rsi_calculator import RSICalculator
+from hypebot.indicators.ema import EMACalculator
 from hypebot.strategy.rsi_strategy import RSIStrategy
+from hypebot.strategy.hybrid_rsi_ema_strategy import RSIEMAHybridStrategy
 from hypebot.strategy.buy_and_hold_strategy import BuyAndHoldStrategy
 from hypebot.data.storage import DataStorage
 from hypebot.position.manager import PositionManager
@@ -139,6 +141,30 @@ def _build_strategy(name: str, config: Config, params: Dict, assets: list[str], 
             assets=assets,
             interval=interval,
             position_manager=pm
+        )
+    elif key in ("rsi_ema_hybrid", "hybrid", "rsiema"):
+        # Parameters with defaults from spec
+        rsi_period = int(params.get("rsi_period", config.trading.rsi_period))
+        rsi_oversold = float(params.get("rsi_oversold", config.trading.rsi_oversold))
+        rsi_trend_threshold = float(params.get("rsi_trend_threshold", 50.0))
+        ema_period = int(params.get("ema_period", 20))
+
+        rsi_calc = RSICalculator(
+            period=rsi_period,
+            oversold_threshold=rsi_oversold,
+            overbought_threshold=config.trading.rsi_overbought,
+        )
+        ema_calc = EMACalculator(period=ema_period)
+        storage = DataStorage(config.database)
+        pm = PositionManager(config.trading, storage, load_existing=False)
+        return RSIEMAHybridStrategy(
+            assets=assets,
+            interval=interval,
+            position_manager=pm,
+            rsi_calculator=rsi_calc,
+            ema_calculator=ema_calc,
+            rsi_trend_threshold=rsi_trend_threshold,
+            oversold_threshold=rsi_oversold,
         )
     raise ValueError(f"Unsupported strategy: {name}")
 
@@ -285,6 +311,29 @@ def main(argv: Optional[list[str]] = None) -> int:
     except Exception as e:
         print(f"Warning: failed to write trades CSV: {e}")
 
+    # 4) Positions CSV (capture position data for each tick)
+    positions_csv_path = os.path.join(output_dir, f"positions_{strategy_name.replace(' ', '_')}.csv")
+    try:
+        if hasattr(result, "positions") and isinstance(result.positions, pd.DataFrame) and not result.positions.empty:  # type: ignore
+            # Reset index to include timestamp as a column
+            positions_df = result.positions.reset_index()  # type: ignore
+            # Ensure timestamp column exists and is properly formatted
+            if "timestamp" in positions_df.columns:
+                positions_df["timestamp"] = pd.to_datetime(positions_df["timestamp"])
+            positions_df.to_csv(positions_csv_path, index=False)
+            print(f"Saved positions CSV: {positions_csv_path}")
+        else:
+            # Create empty CSV with proper headers
+            empty_positions = pd.DataFrame(columns=[
+                "timestamp", "symbol", "side", "size", "entry_price", "current_price",
+                "pnl", "realized_pnl", "unrealized_pnl", "pnl_percentage", "kelly_size",
+                "market_value", "entry_value", "position_timestamp", "cash_balance"
+            ])
+            empty_positions.to_csv(positions_csv_path, index=False)
+            print(f"Saved empty positions CSV: {positions_csv_path}")
+    except Exception as e:
+        print(f"Warning: failed to write positions CSV: {e}")
+
     # Plot will be generated in the buy-and-hold section if available
 
     # 5) Debug info
@@ -345,6 +394,30 @@ def main(argv: Optional[list[str]] = None) -> int:
                     print(f"Saved buy-and-hold trades CSV: {control_trades_csv_path}")
         except Exception as e:
             print(f"Warning: failed to write buy-and-hold trades CSV: {e}")
+        
+        # Save buy-and-hold positions CSV
+        control_positions_csv_path = os.path.join(output_dir, "positions_buy_and_hold.csv")
+        try:
+            if hasattr(control_result, "positions") and isinstance(control_result.positions, pd.DataFrame) and not control_result.positions.empty:
+                # Reset index to include timestamp as a column
+                positions_df = control_result.positions.reset_index()
+                # Ensure timestamp column exists and is properly formatted
+                if "timestamp" in positions_df.columns:
+                    positions_df["timestamp"] = pd.to_datetime(positions_df["timestamp"])
+                positions_df.to_csv(control_positions_csv_path, index=False)
+                print(f"Saved buy-and-hold positions CSV: {control_positions_csv_path}")
+            else:
+                # Create empty CSV with proper headers
+                empty_positions = pd.DataFrame(columns=[
+                    "timestamp", "symbol", "side", "size", "entry_price", "current_price",
+                    "pnl", "realized_pnl", "unrealized_pnl", "pnl_percentage", "kelly_size",
+                    "market_value", "entry_value", "position_timestamp", "cash_balance"
+                ])
+                empty_positions.to_csv(control_positions_csv_path, index=False)
+                print(f"Saved empty buy-and-hold positions CSV: {control_positions_csv_path}")
+        except Exception as e:
+            print(f"Warning: failed to write buy-and-hold positions CSV: {e}")
+        
         print(f"Saved buy-and-hold equity CSV: {control_ecsv_path}")
         print(f"Saved buy-and-hold metrics JSON: {control_mjson_path}")
     

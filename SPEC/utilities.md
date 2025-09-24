@@ -99,6 +99,7 @@ python backtest.py [OPTIONS] [--config CONFIG_FILE]
 - **--strategy, -s** (required): Strategy name to use for backtesting
   - Valid values: "rsi", "buy_and_hold" (extensible for future strategies)
   - Note: Buy-and-hold control strategy is automatically included in all backtests
+  - Planned/added: "rsi_ema_hybrid" for trend-filtered momentum
 - **--interval, -i** (optional): Data granularity/interval (default: "1d")
   - Valid values: "1h", "4h", "1d", "1w", "1mo"
 - **--start-date, --start** (optional): Start date for backtest (default: earliest available data)
@@ -141,6 +142,11 @@ strategy_params:
     overbought: 70
   buy_and_hold:
     # No parameters required - uses equal distribution across assets
+  rsi_ema_hybrid:
+    rsi_period: 14
+    rsi_oversold: 30
+    rsi_trend_threshold: 50
+    ema_period: 20
 ```
 
 ### Usage Examples
