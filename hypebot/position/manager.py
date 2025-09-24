@@ -5,8 +5,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any, Tuple
 import pandas as pd
 
-from .models import Position, PositionSize
-from .kelly_criterion import KellyCriterion
+from .models import Position
 from ..config import TradingConfig
 from ..data.storage import DataStorage
 
@@ -15,13 +14,12 @@ logger = logging.getLogger(__name__)
 
 
 class PositionManager:
-    """Manages trading positions and risk."""
+    """Manages trading positions and portfolio tracking (no position sizing)."""
     
     def __init__(self, config: TradingConfig, storage: DataStorage):
         """Initialize position manager."""
         self.config = config
         self.storage = storage
-        self.kelly_criterion = KellyCriterion(config)
         self._positions: Dict[str, Position] = {}
         self._load_positions()
     
@@ -159,56 +157,6 @@ class PositionManager:
         """Get all active positions."""
         return list(self._positions.values())
     
-    def calculate_position_size(
-        self, 
-        symbol: str, 
-        current_price: float, 
-        signal_strength: float = 1.0,
-        confidence: float = 1.0
-    ) -> PositionSize:
-        """Calculate optimal position size using Kelly Criterion."""
-        try:
-            # Get historical price data
-            price_data = self.storage.load_price_data(symbol=symbol)
-            if price_data.empty:
-                logger.warning(f"No historical data for {symbol}")
-                return PositionSize(
-                    symbol=symbol,
-                    timestamp=datetime.utcnow(),
-                    recommended_size=0.0,
-                    kelly_fraction=0.0,
-                    max_position_size=self.config.max_position_size,
-                    current_price=current_price,
-                    confidence=0.0,
-                    risk_level="HIGH"
-                )
-            
-            # Calculate returns
-            returns = price_data['price'].pct_change().dropna()
-            
-            # Calculate position size
-            position_size = self.kelly_criterion.calculate_position_size(
-                symbol=symbol,
-                current_price=current_price,
-                historical_returns=returns,
-                signal_strength=signal_strength,
-                confidence=confidence
-            )
-            
-            return position_size
-            
-        except Exception as e:
-            logger.error(f"Error calculating position size for {symbol}: {e}")
-            return PositionSize(
-                symbol=symbol,
-                timestamp=datetime.utcnow(),
-                recommended_size=0.0,
-                kelly_fraction=0.0,
-                max_position_size=self.config.max_position_size,
-                current_price=current_price,
-                confidence=0.0,
-                risk_level="HIGH"
-            )
     
     def calculate_portfolio_metrics(self) -> Dict[str, Any]:
         """Calculate portfolio-level metrics."""
@@ -252,29 +200,6 @@ class PositionManager:
                 "win_rate": 0.0
             }
     
-    def check_risk_limits(self, symbol: str, position_size: float) -> Tuple[bool, str]:
-        """Check if position size is within risk limits."""
-        try:
-            # Get current position if exists
-            current_position = self.get_position(symbol)
-            if current_position:
-                total_size = current_position.size + position_size
-            else:
-                total_size = position_size
-            
-            # Check against maximum position size
-            if total_size > self.config.max_position_size:
-                return False, f"Position size {total_size} exceeds maximum {self.config.max_position_size}"
-            
-            # Check against minimum position size
-            if position_size < self.config.min_position_size:
-                return False, f"Position size {position_size} below minimum {self.config.min_position_size}"
-            
-            return True, "Position size is within limits"
-            
-        except Exception as e:
-            logger.error(f"Error checking risk limits: {e}")
-            return False, f"Error checking risk limits: {e}"
     
     def get_position_summary(self) -> pd.DataFrame:
         """Get summary of all positions."""

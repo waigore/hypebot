@@ -5,6 +5,8 @@ import logging
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
 import pandas as pd
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
 
 from .models import PriceData, MarketData, OHLCVData
 from ..config import DatabaseConfig

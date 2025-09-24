@@ -8,29 +8,29 @@ import pytest
 from hypebot.strategy.base import Strategy
 from hypebot.strategy.runner import StrategyRunner, RunnerMode, ExecutionConfig
 from hypebot.strategy.client import TradingClientInterface
-from hypebot.indicators.models import TradingSignal
+from hypebot.strategy.models import StrategyOrder
 
 
 class DummyStrategy(Strategy):
-    async def tick(self, as_of: datetime, historical: Dict[str, pd.DataFrame]) -> List[TradingSignal]:
-        signals: List[TradingSignal] = []
+    async def tick(self, as_of: datetime, historical: Dict[str, pd.DataFrame]) -> List[StrategyOrder]:
+        orders: List[StrategyOrder] = []
         for sym, df in historical.items():
             if df.empty:
                 continue
             close = float(df["close"].iloc[-1])
-            # Emit BUY when close is even, SELL otherwise with strength 0.8
-            sig_type = "BUY" if int(close) % 2 == 0 else "SELL"
-            signals.append(
-                TradingSignal(
+            # Emit BUY when close is even, SELL otherwise
+            side = "BUY" if int(close) % 2 == 0 else "SELL"
+            orders.append(
+                StrategyOrder(
                     symbol=sym,
-                    timestamp=as_of,
-                    signal_type=sig_type,
-                    strength=0.8,
-                    rsi_value=50.0,
+                    side=side,
+                    order_type="MARKET",
+                    quantity=0.02,  # Fixed position size for testing
                     price=close,
+                    timestamp=as_of,
                 )
             )
-        return signals
+        return orders
 
 
 class DummyTradingClient(TradingClientInterface):
@@ -56,25 +56,23 @@ class DummyTradingClient(TradingClientInterface):
 
 
 class DummyPositionManager:
-    def __init__(self, size: float = 0.01):
-        self.size = size
+    def __init__(self):
+        self.positions = {}
 
-    def calculate_position_size(self, symbol: str, current_price: float, signal_strength: float = 1.0, confidence: float = 1.0):
-        return type(
-            "PositionSize",
-            (),
-            {
-                "recommended_size": self.size,
-                "kelly_fraction": 0.5,
-                "max_position_size": 1.0,
-                "current_price": current_price,
-                "confidence": confidence,
-                "risk_level": "LOW",
-            },
-        )()
+    def get_position(self, symbol: str):
+        return self.positions.get(symbol)
 
-    def check_risk_limits(self, symbol: str, position_size: float):
-        return True, "ok"
+    def open_position(self, symbol: str, side: str, size: float, entry_price: float, kelly_size: float):
+        self.positions[symbol] = type("Position", (), {
+            "symbol": symbol,
+            "side": side,
+            "size": size,
+            "entry_price": entry_price,
+            "kelly_size": kelly_size
+        })()
+
+    def close_position(self, symbol: str, exit_price: float):
+        return self.positions.pop(symbol, None)
 
 
 def make_df(start: datetime, n: int) -> pd.DataFrame:
@@ -93,14 +91,14 @@ def make_df(start: datetime, n: int) -> pd.DataFrame:
 
 
 @pytest.mark.asyncio
-async def test_runner_executes_orders_based_on_signals():
+async def test_runner_executes_orders_based_on_strategy_orders():
     start = datetime(2025, 1, 1, tzinfo=timezone.utc)
     hist = {"BTC-USD": make_df(start, 5)}
 
     def loader(symbol: str, interval: str, start_dt, end_dt):
         return hist[symbol]
 
-    pm = DummyPositionManager(size=0.02)
+    pm = DummyPositionManager()
     strat = DummyStrategy(assets=["BTC-USD"], interval="1d", position_manager=pm)
     client = DummyTradingClient()
     runner = StrategyRunner(
@@ -109,7 +107,7 @@ async def test_runner_executes_orders_based_on_signals():
         trading_client=client,
         data_loader=loader,
         mode=RunnerMode.BACKTEST,
-        execution_config=ExecutionConfig(strength_threshold=0.3, cooldown_seconds=0),
+        execution_config=ExecutionConfig(),
     )
 
     ticks = [start + timedelta(days=i) for i in range(3)]
@@ -122,22 +120,20 @@ async def test_runner_executes_orders_based_on_signals():
 
 
 @pytest.mark.asyncio
-async def test_runner_applies_strength_threshold_and_cooldown():
+async def test_runner_executes_all_strategy_orders():
     start = datetime(2025, 1, 1, tzinfo=timezone.utc)
     hist = {"ETH-USD": make_df(start, 3)}
 
     def loader(symbol: str, interval: str, start_dt, end_dt):
         return hist[symbol]
 
-    class WeakSignalStrategy(DummyStrategy):
-        async def tick(self, as_of: datetime, historical: Dict[str, pd.DataFrame]) -> List[TradingSignal]:
-            sigs = await super().tick(as_of, historical)
-            for s in sigs:
-                s.strength = 0.2  # below threshold
-            return sigs
+    class NoOrderStrategy(DummyStrategy):
+        async def tick(self, as_of: datetime, historical: Dict[str, pd.DataFrame]) -> List[StrategyOrder]:
+            # Return no orders
+            return []
 
-    pm = DummyPositionManager(size=0.01)
-    strat = WeakSignalStrategy(assets=["ETH-USD"], interval="1d", position_manager=pm)
+    pm = DummyPositionManager()
+    strat = NoOrderStrategy(assets=["ETH-USD"], interval="1d", position_manager=pm)
     client = DummyTradingClient()
     runner = StrategyRunner(
         strategy=strat,
@@ -145,12 +141,12 @@ async def test_runner_applies_strength_threshold_and_cooldown():
         trading_client=client,
         data_loader=loader,
         mode=RunnerMode.BACKTEST,
-        execution_config=ExecutionConfig(strength_threshold=0.3, cooldown_seconds=600),
+        execution_config=ExecutionConfig(),
     )
 
     ticks = [start + timedelta(days=i) for i in range(2)]
     orders = await runner.run(ticks)
-    # No orders because strength below threshold
+    # No orders because strategy returns empty list
     assert len(orders) == 0
 
 

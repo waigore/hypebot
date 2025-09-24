@@ -9,8 +9,8 @@ from typing import Dict, List, Optional
 import pandas as pd
 
 from ..indicators.base_indicator import BaseIndicator
-from ..indicators.models import TradingSignal
 from ..position.manager import PositionManager
+from .models import StrategyOrder
 
 
 class Strategy(ABC):
@@ -42,11 +42,11 @@ class Strategy(ABC):
         return None
 
     @abstractmethod
-    async def tick(self, as_of: datetime, historical: Dict[str, pd.DataFrame]) -> List[TradingSignal]:
-        """Compute signals from historical data up to as_of.
+    async def tick(self, as_of: datetime, historical: Dict[str, pd.DataFrame]) -> List[StrategyOrder]:
+        """Compute position-sized orders from historical data up to as_of.
 
         - historical: mapping from symbol -> OHLCV DataFrame (UTC index, cols: open,high,low,close,volume).
-        Returns a list of TradingSignal items (may be empty).
+        Returns a list of StrategyOrder items with calculated position sizes (may be empty).
         """
 
     async def on_stop(self) -> None:  # noqa: D401
