@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Callable
 
 import pandas as pd
 import time
@@ -53,7 +53,7 @@ class StrategyRunner:
         # Accumulate executed orders so callers can recover partial progress on errors
         self._orders: List[Order] = []
 
-    async def run(self, ticks: Iterable[datetime]) -> List[Order]:
+    async def run(self, ticks: Iterable[datetime], on_after_tick: Optional[Callable[[datetime], None]] = None) -> List[Order]:
         # Reset accumulated orders each run
         self._orders = []
         await self.strategy.on_start()
@@ -75,6 +75,12 @@ class StrategyRunner:
                 placed = await self._execute(strategy_orders)
                 self.profile["execute_s"] += time.perf_counter() - t2
                 self._orders.extend(placed)
+                # Allow caller to collect per-tick snapshots after state updates
+                if callable(on_after_tick):
+                    try:
+                        on_after_tick(t)
+                    except Exception:
+                        logger.exception("on_after_tick callback raised")
         finally:
             await self.strategy.on_stop()
         return self._orders

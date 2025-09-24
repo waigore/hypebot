@@ -48,6 +48,7 @@ hypebot/
 - **rsi_calculator.py**: RSI calculation with signal generation
 - **base_indicator.py**: Abstract base class for indicators
 - **models.py**: Indicator and signal models
+- **ema (planned/added)**: EMA calculation used by hybrid strategies
 
 ### Position Module (`position/`)
 - **manager.py**: Portfolio tracking and P&L calculation
@@ -63,6 +64,7 @@ hypebot/
 - **runner.py**: Strategy execution runner
 - **client.py**: Trading client interface
 - **rsi_strategy.py**: RSI-based trading strategy
+- **hybrid_rsi_ema (spec)**: Trend-filtered RSI+EMA hybrid strategy (all-in/all-out)
 - **models.py**: Strategy-specific models
 
 ### Backtesting Module (`backtesting/`)
@@ -128,7 +130,7 @@ pytest-asyncio>=0.21.0
 - **TradingSignal**: RSI-based buy/sell signals with strength and metadata
 - **Position**: Portfolio position with P&L tracking
 - **StrategyOrder**: Position-sized orders from strategies
-- **BacktestResult**: Comprehensive backtesting results with metrics
+- **BacktestResult**: Comprehensive backtesting results with metrics and position history
 
 ### Storage Format
 
@@ -136,6 +138,29 @@ Historical data is stored in organized CSV files:
 - **File naming**: `{SYMBOL}_{YEAR}_{GRANULARITY}.csv`
 - **Example**: `BTC-USD_2025_1d.csv`
 - **Format**: Standardized OHLCV columns with UTC timestamps
+
+### Position Data Format
+
+Position tracking data is exported as CSV files with the following structure:
+- **File naming**: `positions_{strategy_name}.csv`
+- **Example**: `positions_RSIStrategy.csv`
+- **Format**: One row per tick, containing:
+  - `timestamp`: UTC timestamp of the tick
+  - `symbol`: Asset symbol (e.g., "SOL-USD")
+  - `side`: Position side ("LONG" or "SHORT")
+  - `size`: Position size in units
+  - `entry_price`: Price at which position was opened
+  - `current_price`: Current market price at this tick
+  - `pnl`: Total P&L (realized + unrealized)
+  - `realized_pnl`: P&L from closed portions
+  - `unrealized_pnl`: P&L from open position
+  - `pnl_percentage`: P&L as percentage of entry value
+  - `kelly_size`: Kelly criterion recommended size
+  - `market_value`: Current market value (size × current_price)
+  - `entry_value`: Entry value (size × entry_price)
+  - `position_timestamp`: When position was originally opened
+  - `cash_balance`: Current cash balance
+- **Empty rows**: When no positions are held, only timestamp and cash_balance are populated
 
 ## Strategy System
 
@@ -159,10 +184,9 @@ The `StrategyRunner` orchestrates strategy execution:
 
 All implemented trading strategies are documented in [strategies.md](strategies.md).
 
-The default RSI strategy provides:
-- RSI-based signal generation with configurable thresholds
-- Kelly Criterion position sizing
-- Risk management and signal filtering
+Included strategies:
+- RSI Strategy: RSI-based momentum with Kelly position sizing
+- RSI + EMA Hybrid: Trend-filtered momentum using RSI(14) and EMA(20), all-in entries and full exits per rules
 
 ## Backtesting
 
@@ -174,12 +198,34 @@ The `BackTester` class provides:
 - Comprehensive performance metrics
 - Equity curve visualization
 - Buy-and-hold baseline comparison
+- Detailed position tracking with CSV export per tick
 
 #### Equity Calculation
 - Equity at each tick is the sum of:
   - Mark-to-market value of all open asset positions, and
   - Current cash position balance
 - The backtester records this equity on every step to produce the equity curve.
+
+#### Position Tracking
+- The backtester captures detailed position data for each strategy at every tick
+- Position data includes all available information from the position manager:
+  - Symbol, side (LONG/SHORT), size, entry price, current price
+  - P&L (total, realized, unrealized), P&L percentage
+  - Kelly size, market value, entry value
+  - Timestamp of position creation and last update
+  - Current cash balance
+- This position data is exported as CSV files with one row per tick per strategy
+- File naming: `positions_{strategy_name}.csv`
+- Enables detailed analysis of position evolution throughout the backtest period
+
+### Backtest Output Files
+
+The backtesting system generates the following files for each strategy:
+- **Equity Curve**: `equity_{strategy_name}.csv` - Portfolio value over time
+- **Position History**: `positions_{strategy_name}.csv` - Detailed position data per tick
+- **Trade Log**: `trades_{strategy_name}.csv` - Individual trade executions
+- **Performance Metrics**: `metrics_{strategy_name}.json` - Calculated performance statistics
+- **Visualization**: `equity_{strategy_name}.png` - Equity curve plot
 
 #### Validity of trading strategy orders
 - If the strategy being backtested issues orders that are incompatible with their overall portfolio positions (e.g. opening asset positions without sufficient cash, closing asset positions without sufficient asset sizes), such actions are marked as errors and the backtesting stopped immediately

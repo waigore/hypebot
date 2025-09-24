@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple, Any
 
 import numpy as np
 import pandas as pd
@@ -32,6 +32,7 @@ class BacktestResult:
     orders: List[Order]
     trades: List[Dict[str, float]]
     snapshots: pd.DataFrame
+    positions: pd.DataFrame  # Position data for each tick
     errors: List[str]
 
 
@@ -145,6 +146,7 @@ class BackTester:
                 orders=[],
                 trades=[],
                 snapshots=pd.DataFrame(),
+                positions=pd.DataFrame(),
                 errors=[],
             )
         all_index = frames[0].index
@@ -156,10 +158,65 @@ class BackTester:
         # Cash/equity tracking (simplified: track portfolio as sum of position values; here, we emulate by marking to close)
         equity_points: List[Tuple[datetime, float]] = []
         snapshots: List[Dict[str, float]] = []
+        position_snapshots: List[Dict[str, Any]] = []
 
         errors: List[str] = []
+        # Define a per-tick callback to snapshot cash/positions after each tick execution
+        position_snapshots: List[Dict[str, Any]] = []
+        snapshots: List[Dict[str, float]] = []
+
+        def _after_tick(as_of: datetime) -> None:
+            total_value = pm.cash_balance
+            tick_position_data: Dict[str, Any] = {
+                "timestamp": as_of,
+                "symbol": None,
+                "side": None,
+                "size": None,
+                "entry_price": None,
+                "current_price": None,
+                "pnl": None,
+                "realized_pnl": None,
+                "unrealized_pnl": None,
+                "pnl_percentage": None,
+                "kelly_size": None,
+                "market_value": None,
+                "entry_value": None,
+                "position_timestamp": None,
+                "cash_balance": pm.cash_balance,
+            }
+
+            for a in assets:
+                df = preloaded.get(a)
+                if df is not None and not df.empty:
+                    sub = df[df.index <= pd.to_datetime(as_of, utc=True)]
+                    if not sub.empty:
+                        price = float(sub["close"].iloc[-1])
+                        pos = pm.get_position(a)
+                        if pos is not None:
+                            pm.update_position_price(a, price)
+                            total_value += pos.size * price
+                            tick_position_data.update({
+                                "symbol": pos.symbol,
+                                "side": pos.side,
+                                "size": pos.size,
+                                "entry_price": pos.entry_price,
+                                "current_price": pos.current_price,
+                                "pnl": pos.pnl,
+                                "realized_pnl": pos.realized_pnl,
+                                "unrealized_pnl": pos.unrealized_pnl,
+                                "pnl_percentage": pos.pnl_percentage,
+                                "kelly_size": pos.kelly_size,
+                                "market_value": pos.market_value,
+                                "entry_value": pos.entry_value,
+                                "position_timestamp": pos.timestamp,
+                            })
+
+            equity_points.append((as_of, total_value))
+            snapshots.append({"timestamp": as_of, "equity": total_value})
+            position_snapshots.append(tick_position_data)
+
         try:
-            orders = await runner.run(ticks)
+            orders = await runner.run(ticks, on_after_tick=_after_tick)
         except RuntimeError as e:
             # Illegal order encountered; stop immediately and report error
             # Preserve any orders placed before the error
@@ -172,36 +229,43 @@ class BackTester:
         # expose simple profiling info on the result via snapshots attrs
         profile_info = getattr(runner, "profile", {})
 
-        # Build equity curve by marking to last close per asset and summing cash plus market value
-        # Calculate total portfolio value at each tick
-        for t in ticks:
-            total_value = pm.cash_balance
-            for a in assets:
-                df = preloaded.get(a)
-                if df is not None and not df.empty:
-                    # locate last price at or before t
-                    sub = df[df.index <= pd.to_datetime(t, utc=True)]
-                    if not sub.empty:
-                        price = float(sub["close"].iloc[-1])
-                        pos = pm.get_position(a)
-                        if pos is not None:
-                            pm.update_position_price(a, price)
-                            # Add market value of position (size * current_price)
-                            total_value += pos.size * price
-            
-            # If no positions, use starting cash
-            if total_value == 0:
-                total_value = self.starting_cash
-                
-            equity_points.append((t, total_value))
-            snapshots.append({"timestamp": t, "equity": total_value})
+        # If no snapshots were collected (e.g., no ticks), fall back to initial point
+        if not snapshots and ticks:
+            t0 = ticks[0]
+            snapshots.append({"timestamp": t0, "equity": self.starting_cash})
+            equity_points.append((t0, self.starting_cash))
+            position_snapshots.append({
+                "timestamp": t0,
+                "symbol": None,
+                "side": None,
+                "size": None,
+                "entry_price": None,
+                "current_price": None,
+                "pnl": None,
+                "realized_pnl": None,
+                "unrealized_pnl": None,
+                "pnl_percentage": None,
+                "kelly_size": None,
+                "market_value": None,
+                "entry_value": None,
+                "position_timestamp": None,
+                "cash_balance": pm.cash_balance,
+            })
 
         equity_curve = pd.Series(
             data=[v for _, v in equity_points], index=pd.to_datetime([t for t, _ in equity_points], utc=True)
         )
         snapshots_df = pd.DataFrame(snapshots).set_index(pd.to_datetime(pd.Series([s["timestamp"] for s in snapshots]), utc=True))
         snapshots_df.attrs["profile"] = profile_info
-        return BacktestResult(equity_curve=equity_curve, orders=orders, trades=[], snapshots=snapshots_df, errors=errors)
+        
+        # Create positions DataFrame
+        positions_df = pd.DataFrame(position_snapshots)
+        if not positions_df.empty and "timestamp" in positions_df.columns:
+            # Convert timestamp to datetime and set as index
+            positions_df["timestamp"] = pd.to_datetime(positions_df["timestamp"], utc=True)
+            positions_df = positions_df.set_index("timestamp")
+        
+        return BacktestResult(equity_curve=equity_curve, orders=orders, trades=[], snapshots=snapshots_df, positions=positions_df, errors=errors)
 
     async def run_with_control(
         self,
