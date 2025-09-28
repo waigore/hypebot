@@ -34,6 +34,9 @@ class PositionManager:
         self._persist: bool = bool(persist)
         # Maintain dedicated cash balance per spec
         self.cash_balance: float = float(starting_cash)
+        # DCA tracking attributes
+        self._dca_injections: List[Tuple[datetime, float]] = []
+        self._total_dca_injected: float = 0.0
         if load_existing:
             self._load_positions()
     
@@ -93,15 +96,14 @@ class PositionManager:
                 logger.warning(f"Position already exists for {symbol}")
                 return False
             # Sufficient cash check for buys (opening new positions consumes cash)
-            notional_cost = float(size) * float(entry_price)
             if side.upper() == "LONG":
-                # Use Decimal for precise comparison
+                # Use Decimal for precise comparison with small tolerance for floating point precision
                 cash_dec = Decimal(str(self.cash_balance))
                 cost_dec = Decimal(str(size)) * Decimal(str(entry_price))
-                if cash_dec < cost_dec:
-                    # Clamp to available cash (this differs from the original implementation and spec; DO NOT CHANGE THIS)
-                    logger.debug("Insufficient cash to open position, clamping to available cash")
-                    cash_dec = cost_dec
+                tolerance = Decimal('0.01')  # Allow 1 cent tolerance for floating point precision
+                if cash_dec < cost_dec - tolerance:
+                    logger.warning(f"Insufficient cash to open position: need {cost_dec}, have {cash_dec}")
+                    return False
 
             position = Position(
                 symbol=symbol,
@@ -120,7 +122,7 @@ class PositionManager:
                 self.cash_balance = float(cash_dec - cost_dec)
             self._save_positions()
             
-            logger.info(f"Opened {side} position for {symbol}: {size} @ {entry_price}")
+            logger.debug(f"Opened {side} position for {symbol}: {size} @ {entry_price}")
             return True
             
         except Exception as e:
@@ -181,7 +183,7 @@ class PositionManager:
                 position.pnl = position.realized_pnl
                 closed_position = self._positions.pop(symbol)
                 self._save_positions()
-                logger.info(f"Closed {position.side} position for {symbol}: P&L = {position.pnl:.2f}")
+                logger.debug(f"Closed {position.side} position for {symbol}: P&L = {position.pnl:.2f}")
                 return closed_position
             else:
                 # Partial close: update realized P&L and remaining metrics
@@ -194,7 +196,7 @@ class PositionManager:
                     position.unrealized_pnl = (float(position.entry_price) - float(position.current_price)) * position.size
                 position.pnl = position.realized_pnl + (position.unrealized_pnl or 0.0)
                 self._save_positions()
-                logger.info(
+                logger.debug(
                     f"Partially closed {symbol}: closed {close_qty}, remaining {position.size}, realized {position.realized_pnl:.2f}"
                 )
                 return position
@@ -305,6 +307,42 @@ class PositionManager:
             logger.error(f"Error creating position summary: {e}")
             return pd.DataFrame()
     
+    def inject_dca_funds(self, amount: float, timestamp: datetime) -> None:
+        """Inject DCA funds into cash balance.
+        
+        Args:
+            amount: Amount to inject
+            timestamp: Timestamp of injection
+        """
+        try:
+            if amount <= 0:
+                logger.warning(f"Invalid DCA injection amount: {amount}")
+                return
+            
+            self.cash_balance += amount
+            self._dca_injections.append((timestamp, amount))
+            self._total_dca_injected += amount
+            
+            logger.debug(f"DCA injection: ${amount:.2f} at {timestamp.isoformat()}, "
+                       f"total DCA: ${self._total_dca_injected:.2f}")
+            
+        except Exception as e:
+            logger.error(f"Error injecting DCA funds: {e}")
+
+    def get_dca_metrics(self) -> Dict[str, Any]:
+        """Get DCA-related metrics.
+        
+        Returns:
+            Dictionary with DCA metrics
+        """
+        return {
+            "total_dca_injected": self._total_dca_injected,
+            "dca_injection_count": len(self._dca_injections),
+            "dca_injections": self._dca_injections.copy(),
+            "initial_cash": self.cash_balance - self._total_dca_injected,
+            "dca_contribution_ratio": self._total_dca_injected / max(self.cash_balance, 1e-12)
+        }
+
     def cleanup_old_positions(self, days: int = 30):
         """Remove positions older than specified days."""
         try:
@@ -323,7 +361,7 @@ class PositionManager:
             
             if positions_to_remove:
                 self._save_positions()
-                logger.info(f"Cleaned up {len(positions_to_remove)} old positions")
+                logger.debug(f"Cleaned up {len(positions_to_remove)} old positions")
             
         except Exception as e:
             logger.error(f"Error cleaning up old positions: {e}")

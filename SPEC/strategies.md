@@ -23,11 +23,18 @@ The Buy-and-Hold strategy:
 - For multiple assets: distributes cash equally across all specified assets
 - No position sizing calculations or risk management applied
 
+**DCA Integration** (when DCA mode is enabled):
+- Automatically purchases additional assets when DCA funds are injected
+- Uses new DCA funds to proportionally increase position sizes
+- Maintains equal distribution across all specified assets
+- Continues purchasing throughout the backtesting period as funds become available
+
 **Position Management**:
 - No selling or rebalancing after initial purchase
 - Positions are held throughout the entire backtesting period
 - No stop-losses, take-profits, or other exit conditions
 - Pure buy-and-hold approach with no active management
+- Accumulates additional positions when DCA funds are available
 
 ### Strategy Parameters
 
@@ -43,12 +50,19 @@ DEFAULT_SYMBOL=BTC
 
 The Buy-and-Hold strategy is implemented in `hypebot/strategy/buy_and_hold_strategy.py` and follows the `Strategy` abstract base class interface:
 
-- **assets**: List of symbols to trade (purchased equally on first tick)
+- **assets**: List of symbols to trade (purchased equally on first tick and with DCA funds)
 - **interval**: Data granularity (1h, 4h, 1d, 1w, 1mo)
-- **tick()**: Returns purchase orders only on first tick, empty list thereafter
+- **tick()**: Returns purchase orders when cash is available (first tick and DCA injection ticks)
 - **on_start()/on_stop()**: Standard lifecycle hooks
+- **position_manager**: Access to current cash balance for dynamic purchasing
 
-Note: The strategy draws from the portfolio's cash position managed by `PositionManager`. If insufficient cash is available, order execution should fail with the appropriate error from the position management layer.
+**DCA-Aware Implementation**:
+- Removes dependency on `starting_cash` parameter
+- Uses `position_manager.cash_balance` for all purchase decisions
+- Purchases assets whenever available cash exceeds zero
+- Supports continuous accumulation with DCA fund injections
+
+Note: The strategy draws from the portfolio's cash position managed by `PositionManager`. DCA funds are automatically injected into the position manager's cash balance, making them immediately available to the strategy for purchasing additional assets.
 
 ### Backtesting Integration
 
@@ -121,7 +135,26 @@ The RSI strategy is implemented in `hypebot/strategy/rsi_strategy.py` and follow
 
 The RSI strategy can be backtested using the HypeBot backtesting engine. See the main [specification](spec.md) for details on running backtests and analyzing performance metrics.
 
-Both strategies’ equity outcomes reflect: mark-to-market value of open asset positions plus remaining cash in the portfolio at each step, as recorded by the backtester’s equity curve.
+Both strategies' equity outcomes reflect: mark-to-market value of open asset positions plus remaining cash in the portfolio at each step, as recorded by the backtester's equity curve.
+
+### DCA Strategy Requirements
+
+All custom strategies should be designed to work with DCA mode:
+
+**Cash Balance Awareness**:
+- Strategies must access cash balance through `position_manager.cash_balance`
+- No assumptions about "starting cash" - always use current available balance
+- Position sizing should consider entire available capital (initial + DCA injections)
+
+**Dynamic Cash Handling**:
+- Strategies should handle dynamic cash balance changes gracefully
+- DCA funds become part of total available capital for position sizing
+- Kelly criterion and other sizing methods should work with changing cash amounts
+
+**Best Practices**:
+- Access cash via `self.position_manager.cash_balance` in strategy implementations
+- Calculate position sizes based on current available funds, not fixed starting amounts
+- Handle cases where cash balance changes between ticks due to DCA injections
 
 ## RSI + EMA Hybrid Strategy (Trend-Filtered Momentum)
 

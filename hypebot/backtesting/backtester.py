@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Dict, Iterable, List, Optional, Tuple, Any
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 from ..config import Config, TradingConfig, DatabaseConfig
 from ..data.storage import DataStorage
@@ -18,6 +21,7 @@ from ..strategy.buy_and_hold_strategy import BuyAndHoldStrategy
 from ..strategy.runner import StrategyRunner, RunnerMode, ExecutionConfig
 from ..strategy.client import TradingClientInterface
 from ..exchange.models import Order
+from ..dca import DCAConfig, DCAScheduler
 
 
 @dataclass
@@ -80,11 +84,13 @@ class BackTester:
         storage: Optional[DataStorage] = None,
         commission: Optional[CommissionModel] = None,
         starting_cash: float = 10_000.0,
+        dca_config: Optional[DCAConfig] = None,
     ) -> None:
         self.config = config
         self.storage = storage or DataStorage(config.database)
         self.commission = commission or CommissionModel(type="percent", value=0.001)
         self.starting_cash = starting_cash
+        self.dca_config = dca_config or DCAConfig()
 
     def _data_loader(self, symbol: str, interval: str, start: Optional[datetime], end: Optional[datetime]) -> pd.DataFrame:
         # This default loader reads from storage; overridden in run_single with preloaded data
@@ -128,15 +134,6 @@ class BackTester:
         def mem_loader(sym: str, _interval: str, _start: Optional[datetime], _end: Optional[datetime]) -> pd.DataFrame:
             return preloaded.get(sym, pd.DataFrame())
 
-        runner = StrategyRunner(
-            strategy=strategy,
-            position_manager=pm,
-            trading_client=client,
-            data_loader=mem_loader,
-            mode=RunnerMode.BACKTEST,
-            execution_config=execution_config or ExecutionConfig(),
-        )
-
         # Establish ticks based on available data across assets
         frames = [preloaded[a] for a in assets]
         frames = [f for f in frames if isinstance(f, pd.DataFrame) and not f.empty]
@@ -154,6 +151,27 @@ class BackTester:
             all_index = all_index.union(f.index)
         all_index = all_index.sort_values()
         ticks: List[datetime] = [ts.to_pydatetime() for ts in all_index]
+
+        # Generate DCA schedule if enabled
+        dca_scheduler = None
+        if self.dca_config.enabled:
+            dca_scheduler = DCAScheduler(
+                self.dca_config,
+                start or datetime.min,
+                end or datetime.max
+            )
+            dca_schedule = dca_scheduler.generate_schedule(ticks)
+            logger.info(f"DCA schedule generated: {dca_schedule.total_injections} injections totaling ${dca_schedule.total_amount}")
+
+        runner = StrategyRunner(
+            strategy=strategy,
+            position_manager=pm,
+            trading_client=client,
+            data_loader=mem_loader,
+            mode=RunnerMode.BACKTEST,
+            execution_config=execution_config or ExecutionConfig(),
+            dca_scheduler=dca_scheduler,
+        )
 
         # Cash/equity tracking (simplified: track portfolio as sum of position values; here, we emulate by marking to close)
         equity_points: List[Tuple[datetime, float]] = []

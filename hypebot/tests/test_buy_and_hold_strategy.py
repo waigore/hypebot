@@ -19,6 +19,7 @@ class TestBuyAndHoldStrategy:
         """Create a mock position manager."""
         pm = Mock(spec=PositionManager)
         pm.get_position.return_value = None
+        pm.cash_balance = 10000.0  # Default cash balance
         return pm
 
     @pytest.fixture
@@ -56,7 +57,7 @@ class TestBuyAndHoldStrategy:
         """Test strategy initialization."""
         assert strategy.assets == ["BTC-USD", "ETH-USD"]
         assert strategy.interval == "1d"
-        assert not strategy._has_purchased
+        assert strategy.starting_cash == 10000.0
 
     @pytest.mark.asyncio
     async def test_first_tick_generates_orders(self, strategy, sample_historical_data, mock_position_manager):
@@ -85,28 +86,32 @@ class TestBuyAndHoldStrategy:
         assert eth_order.price == 52.0
         assert eth_order.quantity == 5000.0 / 52.0  # Half of 10000 / price
         assert eth_order.timestamp == as_of
-        
-        # Should mark as purchased
-        assert strategy._has_purchased
 
     @pytest.mark.asyncio
-    async def test_subsequent_ticks_generate_no_orders(self, strategy, sample_historical_data):
-        """Test that subsequent ticks generate no orders."""
+    async def test_subsequent_ticks_generate_orders_when_cash_available(self, strategy, sample_historical_data, mock_position_manager):
+        """Test that subsequent ticks generate orders when cash is available."""
         as_of = datetime(2024, 1, 1, tzinfo=timezone.utc)
         
-        # First tick
+        # First tick - should generate orders
         orders1 = await strategy.tick(as_of, sample_historical_data)
         assert len(orders1) == 2
-        assert strategy._has_purchased
         
-        # Second tick
+        # Second tick with more cash - should generate orders again
+        mock_position_manager.cash_balance = 5000.0  # Add more cash
         as_of2 = datetime(2024, 1, 2, tzinfo=timezone.utc)
         orders2 = await strategy.tick(as_of2, sample_historical_data)
-        assert len(orders2) == 0
+        assert len(orders2) == 2  # Should generate orders again with new cash
+        
+        # Third tick with no cash - should generate no orders
+        mock_position_manager.cash_balance = 0.0
+        as_of3 = datetime(2024, 1, 3, tzinfo=timezone.utc)
+        orders3 = await strategy.tick(as_of3, sample_historical_data)
+        assert len(orders3) == 0
 
     @pytest.mark.asyncio
     async def test_no_cash_generates_no_orders(self, sample_historical_data, mock_position_manager):
         """Test that no cash generates no orders."""
+        mock_position_manager.cash_balance = 0.0  # Set cash to 0
         strategy = BuyAndHoldStrategy(
             assets=["BTC-USD", "ETH-USD"],
             interval="1d",
@@ -118,7 +123,6 @@ class TestBuyAndHoldStrategy:
         orders = await strategy.tick(as_of, sample_historical_data)
         
         assert len(orders) == 0
-        assert not strategy._has_purchased
 
     @pytest.mark.asyncio
     async def test_no_valid_data_generates_no_orders(self, strategy, mock_position_manager):
@@ -132,7 +136,6 @@ class TestBuyAndHoldStrategy:
         orders = await strategy.tick(as_of, empty_data)
         
         assert len(orders) == 0
-        assert not strategy._has_purchased
 
     @pytest.mark.asyncio
     async def test_partial_valid_data(self, strategy, sample_historical_data, mock_position_manager):
@@ -150,7 +153,6 @@ class TestBuyAndHoldStrategy:
         assert len(orders) == 1
         assert orders[0].symbol == "BTC-USD"
         assert orders[0].quantity == 10000.0 / 105.0  # All cash goes to single asset
-        assert strategy._has_purchased
 
     @pytest.mark.asyncio
     async def test_single_asset_strategy(self, mock_position_manager):
@@ -180,22 +182,16 @@ class TestBuyAndHoldStrategy:
         assert orders[0].quantity == 10000.0 / 105.0  # All cash goes to single asset
 
     @pytest.mark.asyncio
-    async def test_on_start_resets_purchase_flag(self, strategy):
-        """Test that on_start resets the purchase flag."""
-        strategy._has_purchased = True
-        
+    async def test_on_start_calls_super(self, strategy):
+        """Test that on_start calls super method."""
         await strategy.on_start()
-        
-        assert not strategy._has_purchased
+        # Should not raise any exceptions
 
     @pytest.mark.asyncio
-    async def test_on_stop_resets_purchase_flag(self, strategy):
-        """Test that on_stop resets the purchase flag."""
-        strategy._has_purchased = True
-        
+    async def test_on_stop_calls_super(self, strategy):
+        """Test that on_stop calls super method."""
         await strategy.on_stop()
-        
-        assert not strategy._has_purchased
+        # Should not raise any exceptions
 
     @pytest.mark.asyncio
     async def test_cash_distribution_equal(self, strategy, sample_historical_data, mock_position_manager):
@@ -244,4 +240,3 @@ class TestBuyAndHoldStrategy:
         orders = await strategy.tick(as_of, invalid_data)
         
         assert len(orders) == 0
-        assert not strategy._has_purchased

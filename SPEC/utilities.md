@@ -109,6 +109,11 @@ python backtest.py [OPTIONS] [--config CONFIG_FILE]
 - **--starting-cash, --cash** (optional): Starting cash balance (default: 10000.0)
 - **--commission** (optional): Commission model (default: "percent:0.001")
   - Format: "fixed:0.5" or "percent:0.001"
+- **--dca-frequency** (optional): DCA injection frequency (default: disabled)
+  - Valid values: "daily", "weekly", "bi-weekly", "monthly", "yearly"
+- **--dca-amount** (optional): DCA injection amount per period (default: 1000.0)
+- **--dca-start-date** (optional): When to start DCA injections (default: one period after backtest start)
+- **--dca-end-date** (optional): When to stop DCA injections (default: backtest end date)
 - **--config, -c** (optional): Path to configuration file with backtest parameters
 - **--no-plot** (optional): Suppress equity curve plot generation
 - **--debug** (optional): Show profiling and debugging information
@@ -147,6 +152,72 @@ strategy_params:
     rsi_oversold: 30
     rsi_trend_threshold: 50
     ema_period: 20
+```
+
+### DCA Configuration
+
+Dollar Cost Averaging (DCA) mode allows periodic cash injections during backtesting to simulate regular investment contributions.
+
+#### YAML DCA Configuration
+
+```yaml
+backtest:
+  assets: ["BTC-USD"]
+  strategy: "rsiema"
+  interval: "1d"
+  start_date: "2020-09-28"
+  end_date: "2025-09-27"
+  starting_cash: 10000.0
+  dca:  # DCA configuration section
+    enabled: true
+    frequency: "monthly"  # daily, weekly, bi-weekly, monthly, yearly
+    amount: 1000.0        # Amount to inject per DCA period
+    start_date: "2020-10-01"  # Optional: when to start DCA
+    end_date: "2024-12-31"    # Optional: when to stop DCA
+  commission:
+    type: "percent"
+    value: 0.001
+```
+
+#### CLI DCA Configuration
+
+```bash
+# Enable DCA mode via command line
+--dca-frequency {daily,weekly,bi-weekly,monthly,yearly}
+--dca-amount AMOUNT
+--dca-start-date DATE  # Optional
+--dca-end-date DATE    # Optional
+```
+
+#### DCA Frequency Options
+
+- **daily**: Every trading day from start date
+- **weekly**: Every 7 days from start date
+- **bi-weekly**: Every 14 days from start date  
+- **monthly**: First trading day of each month (default)
+- **yearly**: First trading day of each year
+
+#### DCA Schedule Calculation
+
+The DCA scheduler generates injection dates based on:
+- **Frequency**: Determines interval between injections
+- **Start Date**: When DCA begins (defaults to one period after backtest start)
+- **End Date**: When DCA stops (defaults to backtest end)
+- **Trading Days**: Only injects on actual trading days (no weekends/holidays)
+
+#### DCA Usage Examples
+
+```bash
+# Monthly DCA of $1000 on BTC-USD
+python backtest.py --assets BTC-USD --strategy rsi --dca-frequency monthly --dca-amount 1000
+
+# Weekly DCA with custom date range
+python backtest.py --assets "BTC-USD,ETH-USD" --strategy rsi_ema_hybrid \
+  --dca-frequency weekly --dca-amount 500 \
+  --dca-start-date "2024-01-01" --dca-end-date "2024-12-31"
+
+# DCA configuration via YAML file
+python backtest.py --config backtest_with_dca.yaml
 ```
 
 ### Usage Examples
@@ -197,6 +268,10 @@ python backtest.py --assets "BTC-USD,ETH-USD" --strategy rsi --commission "fixed
   - Maximum drawdown and duration
   - Win rate and average trade duration
   - Kelly criterion statistics
+  - DCA metrics (when DCA enabled):
+    - Total DCA injections
+    - DCA contribution ratio (DCA vs. initial capital)
+    - DCA injection count and timeline
 
 ### Debug and Profiling Information
 When the `--debug` flag is used, the utility provides:
@@ -222,8 +297,10 @@ When the `--debug` flag is used, the utility provides:
 - **Position Module**: Uses `PositionManager` for portfolio tracking
   - Maintains a dedicated cash position when starting cash is provided
   - Debits cash on buys and credits cash on sells
+  - Supports DCA fund injection via `inject_dca_funds()` method
   - Prevents opening positions without sufficient cash; raises an error
   - Prevents closing more than held asset quantity; raises an error
+- **DCA Module**: Uses `DCAScheduler` for generating injection schedules and timing
 - **Configuration**: Extends existing `Config` classes for backtest-specific settings
 - **Visualization**: Utilizes `matplotlib` for equity curve generation
 - **Logging**: Integrates with existing logging infrastructure for debug output

@@ -26,6 +26,7 @@ from hypebot.config import Config
 from hypebot.backtesting.backtester import BackTester, CommissionModel
 from hypebot.backtesting.metrics import compute_metrics
 from hypebot.backtesting.visualize import plot_equity_curves
+from hypebot.dca import DCAConfig
 from hypebot.indicators.rsi_calculator import RSICalculator
 from hypebot.indicators.ema import EMACalculator
 from hypebot.strategy.rsi_strategy import RSIStrategy
@@ -86,11 +87,16 @@ def _resolve_args_with_config(args: argparse.Namespace, cfg: Dict) -> Tuple[Dict
         "output_dir": args.output_dir,
         "show_plot": not args.no_plot,
         "debug": args.debug,
+        "dca_frequency": args.dca_frequency,
+        "dca_amount": args.dca_amount,
+        "dca_start_date": args.dca_start_date,
+        "dca_end_date": args.dca_end_date,
     }
     if cfg:
         bt = cfg.get("backtest") or {}
         # Only fill from config when CLI did not provide a value (CLI precedence)
-        for key in ("interval", "start_date", "end_date", "starting_cash", "output_dir", "debug"):
+        for key in ("interval", "start_date", "end_date", "starting_cash", "output_dir", "debug", 
+                   "dca_frequency", "dca_amount", "dca_start_date", "dca_end_date"):
             if backtest_cfg.get(key) is None and bt.get(key) is not None:
                 backtest_cfg[key] = bt.get(key)
         # show_plot defaults to True in config unless explicitly false
@@ -103,6 +109,13 @@ def _resolve_args_with_config(args: argparse.Namespace, cfg: Dict) -> Tuple[Dict
         if isinstance(bt.get("commission"), dict):
             cdict = bt.get("commission")
             backtest_cfg["commission"] = f"{cdict.get('type')}:{cdict.get('value')}"
+        # DCA configuration
+        if isinstance(bt.get("dca"), dict):
+            dca_dict = bt.get("dca")
+            backtest_cfg["dca_frequency"] = dca_dict.get("frequency")
+            backtest_cfg["dca_amount"] = dca_dict.get("amount")
+            backtest_cfg["dca_start_date"] = dca_dict.get("start_date")
+            backtest_cfg["dca_end_date"] = dca_dict.get("end_date")
     else:
         backtest_cfg["assets"] = args.assets
         backtest_cfg["strategy"] = args.strategy
@@ -172,6 +185,9 @@ def _build_strategy(name: str, config: Config, params: Dict, assets: list[str], 
 def _print_metrics(name: str, _metrics: Dict[str, float]) -> None:
     def pct(x: float) -> str:
         return f"{x*100:.2f}%"
+    def fmt(x: float) -> str:
+        return f"${x:,.2f}"
+    
     print(f"\nResults - {name}")
     print("====================")
     print(f"Total Return:   {pct(_metrics.get('return_pct', 0.0))}")
@@ -180,6 +196,17 @@ def _print_metrics(name: str, _metrics: Dict[str, float]) -> None:
     print(f"Sharpe:         {_metrics.get('sharpe', 0.0):.2f}")
     print(f"Sortino:        {_metrics.get('sortino', 0.0):.2f}")
     print(f"Max Drawdown:   {pct(_metrics.get('max_drawdown', 0.0))}")
+    
+    # Print DCA metrics if available
+    if _metrics.get('total_dca_injected', 0) > 0:
+        print("\nDCA Metrics:")
+        print("------------")
+        print(f"Total DCA Injected:    {fmt(_metrics.get('total_dca_injected', 0.0))}")
+        print(f"DCA Injection Count:   {int(_metrics.get('dca_injection_count', 0))}")
+        print(f"DCA Contribution:      {pct(_metrics.get('dca_contribution_ratio', 0.0))}")
+        print(f"DCA Adjusted Return:   {pct(_metrics.get('dca_adjusted_return', 0.0))}")
+        print(f"Initial Cash:          {fmt(_metrics.get('initial_cash', 0.0))}")
+        print(f"Total Capital:         {fmt(_metrics.get('total_capital', 0.0))}")
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -191,6 +218,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--end-date", "--end", dest="end_date", type=str, default=None)
     parser.add_argument("--starting-cash", "--cash", dest="starting_cash", type=float, default=10000.0)
     parser.add_argument("--commission", type=str, default=None, help="fixed:0.5 or percent:0.001")
+    parser.add_argument("--dca-frequency", type=str, default=None, 
+                       choices=["daily", "weekly", "bi-weekly", "monthly", "yearly"],
+                       help="DCA injection frequency")
+    parser.add_argument("--dca-amount", type=float, default=None, help="DCA injection amount per period")
+    parser.add_argument("--dca-start-date", type=str, default=None, help="DCA start date (YYYY-MM-DD)")
+    parser.add_argument("--dca-end-date", type=str, default=None, help="DCA end date (YYYY-MM-DD)")
     parser.add_argument("--config", "-c", type=str, default=None, help="YAML config file")
     parser.add_argument("--no-plot", action="store_true", help="Suppress equity curve plot")
     parser.add_argument("--debug", action="store_true", help="Show profiling information")
@@ -222,11 +255,31 @@ def main(argv: Optional[list[str]] = None) -> int:
     output_dir = str(merged.get("output_dir") or "./backtest_results")
     show_plot = bool(merged.get("show_plot", True))
     debug = bool(merged.get("debug", False))
+    
+    # DCA configuration
+    dca_frequency = merged.get("dca_frequency")
+    dca_amount = merged.get("dca_amount")
+    dca_start_date = _parse_datetime(merged.get("dca_start_date"))
+    dca_end_date = _parse_datetime(merged.get("dca_end_date"))
+    
+    # Create DCA config if any DCA parameters are provided
+    dca_config = None
+    if dca_frequency and dca_amount:
+        dca_config = DCAConfig(
+            enabled=True,
+            frequency=dca_frequency,
+            amount=float(dca_amount),
+            start_date=dca_start_date,
+            end_date=dca_end_date
+        )
 
     os.makedirs(output_dir, exist_ok=True)
 
+    # Set logging level early to capture DCA logs
     if debug:
         logging.basicConfig(level=logging.DEBUG)
+    else:
+        logging.basicConfig(level=logging.INFO)
 
     # Build runtime config (do not call validate here; backtests don't require live API keys)
     config = Config.from_env()
@@ -236,7 +289,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     strategy = _build_strategy(strategy_name, config, strat_params, assets=assets, interval=interval)
 
     # Run the backtest with control strategy
-    bt = BackTester(config=config, commission=commission, starting_cash=starting_cash)
+    bt = BackTester(config=config, commission=commission, starting_cash=starting_cash, dca_config=dca_config)
 
     t0 = time.perf_counter()
     results = None
@@ -270,7 +323,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         "1w": 52,
         "1mo": 12,
     }.get(interval, 252)
-    metrics = compute_metrics(equity_curve, risk_free_rate=config.trading.risk_free_rate, periods_per_year=periods_per_year)
+    
+    # Get DCA metrics from position manager if available
+    dca_metrics = None
+    if hasattr(strategy, 'position_manager') and hasattr(strategy.position_manager, 'get_dca_metrics'):
+        dca_metrics = strategy.position_manager.get_dca_metrics()
+    
+    metrics = compute_metrics(equity_curve, risk_free_rate=config.trading.risk_free_rate, 
+                            periods_per_year=periods_per_year, dca_metrics=dca_metrics)
     _print_metrics(strategy_name, metrics)
 
     print(f"Elapsed: {elapsed_s:.2f}s | Points: {len(equity_curve)}")
