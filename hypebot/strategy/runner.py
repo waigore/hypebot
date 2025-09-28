@@ -42,6 +42,7 @@ class StrategyRunner:
         data_loader,  # callable (symbol, interval, start, end) -> DataFrame
         mode: str = RunnerMode.BACKTEST,
         execution_config: Optional[ExecutionConfig] = None,
+        dca_scheduler: Optional[Any] = None,  # DCAScheduler type
     ) -> None:
         self.strategy = strategy
         self.position_manager = position_manager
@@ -49,6 +50,7 @@ class StrategyRunner:
         self.data_loader = data_loader
         self.mode = mode
         self.config = execution_config or ExecutionConfig()
+        self.dca_scheduler = dca_scheduler
         self.profile: Dict[str, float] = {"slice_s": 0.0, "tick_s": 0.0, "execute_s": 0.0}
         # Accumulate executed orders so callers can recover partial progress on errors
         self._orders: List[Order] = []
@@ -63,6 +65,14 @@ class StrategyRunner:
             for i, t in enumerate(sorted_ticks):
                 if i % 100 == 0:
                     logger.debug(f"StrategyRunner tick {i}/{total} at {t.isoformat()}")
+                
+                # Check for DCA injection before strategy tick
+                if self.dca_scheduler:
+                    injection_amount = self.dca_scheduler.get_injection_amount(t)
+                    if injection_amount:
+                        logger.debug(f"DCA injection scheduled for {t}: ${injection_amount}")
+                        self.position_manager.inject_dca_funds(injection_amount, t)
+                
                 t0 = time.perf_counter()
                 historical = self._slice_historical(as_of=t)
                 self.profile["slice_s"] += time.perf_counter() - t0

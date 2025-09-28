@@ -16,29 +16,25 @@ from .models import StrategyOrder
 
 
 class BuyAndHoldStrategy(Strategy):
-    """Strategy that purchases assets in full on first tick and holds them.
+    """Strategy that purchases assets using all available cash and holds them.
 
     This strategy:
-    - Uses 100% of available cash on the first tick
+    - Uses 100% of available cash on every tick (including DCA injections)
     - For single asset: purchases entire position in that asset
     - For multiple assets: distributes cash equally across all assets
-    - Never sells or rebalances after initial purchase
+    - Never sells or rebalances after purchase
     - Provides simple baseline for strategy performance comparison
+    - Automatically accounts for DCA injections by using current cash balance
     """
 
     def __init__(self, *args, starting_cash: float = 10000.0, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._has_purchased = False
         self.starting_cash = starting_cash
 
     async def tick(self, as_of: datetime, historical: Dict[str, pd.DataFrame]) -> List[StrategyOrder]:
-        """Generate buy orders only on the first tick, empty list thereafter."""
+        """Generate buy orders using all available cash (including DCA injections)."""
         orders: List[StrategyOrder] = []
         
-        # Only purchase on the first tick
-        if self._has_purchased:
-            return orders
-            
         # Check if we have valid data for all assets
         valid_assets = []
         for symbol in self.assets:
@@ -49,8 +45,8 @@ class BuyAndHoldStrategy(Strategy):
         if not valid_assets:
             return orders
             
-        # Use starting cash amount
-        cash = self.starting_cash
+        # Use current available cash (includes DCA injections)
+        cash = self.position_manager.cash_balance
         if cash <= 0:
             return orders
             
@@ -75,17 +71,12 @@ class BuyAndHoldStrategy(Strategy):
             )
             orders.append(order)
         
-        # Mark that we've made our initial purchase
-        self._has_purchased = True
-        
         return orders
 
     async def on_start(self) -> None:
-        """Reset purchase flag when strategy starts."""
-        self._has_purchased = False
+        """Initialize strategy."""
         await super().on_start()
 
     async def on_stop(self) -> None:
-        """Reset purchase flag when strategy stops."""
-        self._has_purchased = False
+        """Clean up strategy."""
         await super().on_stop()

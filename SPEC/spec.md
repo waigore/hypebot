@@ -11,6 +11,7 @@ HypeBot is a Python-based cryptocurrency trading bot that connects to Hyperliqui
 - **Technical Analysis**: RSI indicator with signal generation
 - **Position Management**: Kelly criterion for optimal position sizing
 - **Backtesting**: Historical strategy testing with comprehensive reporting
+- **DCA Support**: Dollar Cost Averaging mode with configurable frequencies and amounts
 - **Data Storage**: Organized CSV storage for historical OHLCV data
 - **Utility Programs**: Command-line tools for data retrieval and backtesting
 
@@ -68,9 +69,10 @@ hypebot/
 - **models.py**: Strategy-specific models
 
 ### Backtesting Module (`backtesting/`)
-- **backtester.py**: Backtesting engine
+- **backtester.py**: Backtesting engine with DCA support
 - **metrics.py**: Performance metrics calculation
 - **visualize.py**: Equity curve visualization with control strategy comparison
+- **dca_scheduler.py**: DCA schedule calculation and management
 
 ## Configuration
 
@@ -131,6 +133,8 @@ pytest-asyncio>=0.21.0
 - **Position**: Portfolio position with P&L tracking
 - **StrategyOrder**: Position-sized orders from strategies
 - **BacktestResult**: Comprehensive backtesting results with metrics and position history
+- **DCAConfig**: DCA configuration with frequency, amount, and date ranges
+- **DCASchedule**: Pre-calculated DCA injection dates and amounts
 
 ### Storage Format
 
@@ -195,6 +199,7 @@ Included strategies:
 The `BackTester` class provides:
 - Multi-strategy backtesting on historical data
 - Configurable commission models (fixed fee or percentage)
+- DCA mode with periodic cash injections
 - Comprehensive performance metrics
 - Equity curve visualization
 - Buy-and-hold baseline comparison
@@ -217,6 +222,33 @@ The `BackTester` class provides:
 - This position data is exported as CSV files with one row per tick per strategy
 - File naming: `positions_{strategy_name}.csv`
 - Enables detailed analysis of position evolution throughout the backtest period
+
+#### DCA Mode Integration
+
+When DCA mode is enabled, the backtesting system:
+
+**DCA Schedule Generation**:
+- Calculates injection dates based on frequency and date ranges
+- Aligns injections with actual trading days (no weekends/holidays)
+- Stores schedule as sorted list of timestamps for efficient lookup
+
+**Cash Injection Process**:
+- Before each tick, checks if current timestamp matches DCA schedule
+- Injects specified DCA amount into position manager's cash balance
+- Logs DCA injections for tracking and debugging
+- Makes funds immediately available to strategies
+
+**Strategy Integration**:
+- All strategies access current cash balance through position manager
+- No assumptions about "starting cash" - always use current balance
+- DCA funds become part of total available capital for position sizing
+- Buy-and-Hold strategy automatically purchases with new DCA funds
+
+**DCA Reporting**:
+- Tracks total DCA injections vs. initial capital
+- Calculates DCA contribution ratios in performance metrics
+- Shows DCA injection timeline in backtest results
+- Includes DCA parameters in saved configuration
 
 ### Backtest Output Files
 
@@ -248,6 +280,10 @@ The backtesting system automatically includes a Buy-and-Hold control strategy:
 - Maximum drawdown and duration
 - Win rate and trade statistics
 - Kelly criterion analysis
+- DCA metrics (when DCA enabled):
+  - Total DCA injections
+  - DCA contribution ratio (DCA vs. initial capital)
+  - DCA injection count and timeline
 
 ### HTML Report Generation
 
@@ -371,10 +407,15 @@ mypy .
 - Advanced strategy implementations
 - Performance optimizations
 
+📋 **Planned**:
+- DCA mode implementation
+- Enhanced DCA reporting and analytics
+
 ## Next Steps
 
-1. Complete live trading integration
-2. Add more technical indicators
-3. Implement additional strategies
-4. Enhance risk management features
-5. Add real-time monitoring dashboard
+1. Implement DCA mode with schedule calculation and cash injection
+2. Complete live trading integration
+3. Add more technical indicators
+4. Implement additional strategies
+5. Enhance risk management features
+6. Add real-time monitoring dashboard

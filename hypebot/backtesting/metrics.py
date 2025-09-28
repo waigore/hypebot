@@ -13,7 +13,7 @@ def _safe_annualize(period_returns: pd.Series, periods_per_year: int) -> float:
     return (1 + period_returns.mean()) ** periods_per_year - 1 if not period_returns.empty else 0.0
 
 
-def compute_metrics(equity_curve: pd.Series, risk_free_rate: float = 0.0, periods_per_year: int = 252) -> Dict[str, float]:
+def compute_metrics(equity_curve: pd.Series, risk_free_rate: float = 0.0, periods_per_year: int = 252, dca_metrics: Dict = None) -> Dict[str, float]:
     if equity_curve is None:
         raise ValueError("Equity curve is required")
 
@@ -38,7 +38,7 @@ def compute_metrics(equity_curve: pd.Series, risk_free_rate: float = 0.0, period
     drawdowns = equity / running_max - 1.0
     max_drawdown = drawdowns.min() if not drawdowns.empty else 0.0
 
-    return {
+    metrics = {
         "pnl": float(total_return * equity.iloc[0]),
         "return_pct": float(total_return),
         "cagr": float(cagr),
@@ -46,6 +46,51 @@ def compute_metrics(equity_curve: pd.Series, risk_free_rate: float = 0.0, period
         "sharpe": float(sharpe),
         "sortino": float(sortino),
         "max_drawdown": float(max_drawdown),
+    }
+
+    # Add DCA metrics if available
+    if dca_metrics:
+        metrics.update(compute_dca_metrics(equity, dca_metrics))
+
+    return metrics
+
+
+def compute_dca_metrics(equity_curve: pd.Series, dca_metrics: Dict) -> Dict[str, float]:
+    """Compute DCA-specific performance metrics.
+    
+    Args:
+        equity_curve: Portfolio equity curve
+        dca_metrics: DCA metrics from position manager
+        
+    Returns:
+        Dictionary with DCA-specific metrics
+    """
+    if not dca_metrics:
+        return {}
+
+    total_dca_injected = dca_metrics.get("total_dca_injected", 0.0)
+    initial_cash = dca_metrics.get("initial_cash", 0.0)
+    dca_contribution_ratio = dca_metrics.get("dca_contribution_ratio", 0.0)
+    
+    # Calculate DCA-adjusted returns
+    total_capital = initial_cash + total_dca_injected
+    if total_capital > 0:
+        dca_adjusted_return = (equity_curve.iloc[-1] / total_capital) - 1.0
+    else:
+        dca_adjusted_return = 0.0
+
+    # Calculate return attribution
+    initial_return = (equity_curve.iloc[-1] / equity_curve.iloc[0]) - 1.0 if equity_curve.iloc[0] > 0 else 0.0
+    dca_return_contribution = dca_adjusted_return - initial_return
+
+    return {
+        "total_dca_injected": float(total_dca_injected),
+        "dca_injection_count": float(dca_metrics.get("dca_injection_count", 0)),
+        "dca_contribution_ratio": float(dca_contribution_ratio),
+        "dca_adjusted_return": float(dca_adjusted_return),
+        "dca_return_contribution": float(dca_return_contribution),
+        "initial_cash": float(initial_cash),
+        "total_capital": float(total_capital),
     }
 
 
